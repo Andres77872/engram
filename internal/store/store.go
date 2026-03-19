@@ -66,6 +66,7 @@ type SessionSummary struct {
 	EndedAt          *string `json:"ended_at,omitempty"`
 	Summary          *string `json:"summary,omitempty"`
 	ObservationCount int     `json:"observation_count"`
+	PromptCount      int     `json:"prompt_count"`
 }
 
 type Stats struct {
@@ -833,7 +834,8 @@ func (s *Store) RecentSessions(project string, limit int) ([]SessionSummary, err
 
 	query := `
 		SELECT s.id, s.project, s.started_at, s.ended_at, s.summary,
-		       COUNT(o.id) as observation_count
+		       COUNT(DISTINCT o.id) as observation_count,
+		       (SELECT COUNT(*) FROM user_prompts p WHERE p.session_id = s.id) as prompt_count
 		FROM sessions s
 		LEFT JOIN observations o ON o.session_id = s.id AND o.deleted_at IS NULL
 		WHERE 1=1
@@ -857,7 +859,7 @@ func (s *Store) RecentSessions(project string, limit int) ([]SessionSummary, err
 	var results []SessionSummary
 	for rows.Next() {
 		var ss SessionSummary
-		if err := rows.Scan(&ss.ID, &ss.Project, &ss.StartedAt, &ss.EndedAt, &ss.Summary, &ss.ObservationCount); err != nil {
+		if err := rows.Scan(&ss.ID, &ss.Project, &ss.StartedAt, &ss.EndedAt, &ss.Summary, &ss.ObservationCount, &ss.PromptCount); err != nil {
 			return nil, err
 		}
 		results = append(results, ss)
@@ -873,7 +875,8 @@ func (s *Store) AllSessions(project string, limit int) ([]SessionSummary, error)
 
 	query := `
 		SELECT s.id, s.project, s.started_at, s.ended_at, s.summary,
-		       COUNT(o.id) as observation_count
+		       COUNT(DISTINCT o.id) as observation_count,
+		       (SELECT COUNT(*) FROM user_prompts p WHERE p.session_id = s.id) as prompt_count
 		FROM sessions s
 		LEFT JOIN observations o ON o.session_id = s.id AND o.deleted_at IS NULL
 		WHERE 1=1
@@ -897,7 +900,7 @@ func (s *Store) AllSessions(project string, limit int) ([]SessionSummary, error)
 	var results []SessionSummary
 	for rows.Next() {
 		var ss SessionSummary
-		if err := rows.Scan(&ss.ID, &ss.Project, &ss.StartedAt, &ss.EndedAt, &ss.Summary, &ss.ObservationCount); err != nil {
+		if err := rows.Scan(&ss.ID, &ss.Project, &ss.StartedAt, &ss.EndedAt, &ss.Summary, &ss.ObservationCount, &ss.PromptCount); err != nil {
 			return nil, err
 		}
 		results = append(results, ss)
@@ -1574,6 +1577,83 @@ func (s *Store) ClearProjectSessions(project string) (*DeleteResult, error) {
 	return result, nil
 }
 
+// CountEmptySessions returns the number of sessions with zero observations, zero prompts, and no summary.
+// If project is non-empty, it scopes the count to that project.
+func (s *Store) CountEmptySessions(project string) (int, error) {
+	query := `
+		SELECT COUNT(*) FROM sessions s
+		WHERE (s.summary IS NULL OR s.summary = '')
+		  AND (SELECT COUNT(*) FROM observations o WHERE o.session_id = s.id AND o.deleted_at IS NULL) = 0
+		  AND (SELECT COUNT(*) FROM user_prompts p WHERE p.session_id = s.id) = 0
+	`
+	args := []any{}
+	if project != "" {
+		query += " AND s.project = ?"
+		args = append(args, project)
+	}
+
+	var count int
+	if err := s.db.QueryRow(query, args...).Scan(&count); err != nil {
+		return 0, err
+	}
+	return count, nil
+}
+
+// DeleteEmptySessions deletes all sessions with zero observations, zero prompts, and no summary.
+// If project is non-empty, it scopes the deletion to that project.
+func (s *Store) DeleteEmptySessions(project string) (*DeleteResult, error) {
+	result := &DeleteResult{}
+	err := s.withTx(func(tx *sql.Tx) error {
+		query := `
+			SELECT id FROM sessions s
+			WHERE (s.summary IS NULL OR s.summary = '')
+			  AND (SELECT COUNT(*) FROM observations o WHERE o.session_id = s.id AND o.deleted_at IS NULL) = 0
+			  AND (SELECT COUNT(*) FROM user_prompts p WHERE p.session_id = s.id) = 0
+		`
+		args := []any{}
+		if project != "" {
+			query += " AND s.project = ?"
+			args = append(args, project)
+		}
+
+		rows, err := tx.Query(query, args...)
+		if err != nil {
+			return err
+		}
+		var sessionIDs []string
+		for rows.Next() {
+			var id string
+			if err := rows.Scan(&id); err != nil {
+				rows.Close()
+				return err
+			}
+			sessionIDs = append(sessionIDs, id)
+		}
+		rows.Close()
+		if err := rows.Err(); err != nil {
+			return err
+		}
+
+		for _, sessionID := range sessionIDs {
+			if _, err := s.execHook(tx, `DELETE FROM sessions WHERE id = ?`, sessionID); err != nil {
+				return err
+			}
+			if err := s.enqueueSyncMutationTx(tx, SyncEntitySession, sessionID, SyncOpDelete, syncSessionPayload{
+				ID: sessionID,
+			}); err != nil {
+				return err
+			}
+			result.SessionsDeleted++
+		}
+
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return result, nil
+}
+
 func (s *Store) DeleteProject(project string) (*DeleteResult, error) {
 	if project == "" {
 		return nil, fmt.Errorf("project name must not be empty")
@@ -2050,7 +2130,8 @@ func (s *Store) FilterSessions(query string, project string, limit int) ([]Sessi
 
 	q := `
 		SELECT s.id, s.project, s.started_at, s.ended_at, s.summary,
-		       COUNT(o.id) as observation_count
+		       COUNT(DISTINCT o.id) as observation_count,
+		       (SELECT COUNT(*) FROM user_prompts p WHERE p.session_id = s.id) as prompt_count
 		FROM sessions s
 		LEFT JOIN observations o ON o.session_id = s.id AND o.deleted_at IS NULL
 		WHERE (LOWER(s.id) LIKE '%' || LOWER(?) || '%'
@@ -2076,7 +2157,7 @@ func (s *Store) FilterSessions(query string, project string, limit int) ([]Sessi
 	var results []SessionSummary
 	for rows.Next() {
 		var ss SessionSummary
-		if err := rows.Scan(&ss.ID, &ss.Project, &ss.StartedAt, &ss.EndedAt, &ss.Summary, &ss.ObservationCount); err != nil {
+		if err := rows.Scan(&ss.ID, &ss.Project, &ss.StartedAt, &ss.EndedAt, &ss.Summary, &ss.ObservationCount, &ss.PromptCount); err != nil {
 			return nil, err
 		}
 		results = append(results, ss)

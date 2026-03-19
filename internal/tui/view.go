@@ -506,11 +506,17 @@ func (m Model) viewSessions() string {
 			summary = truncateStr(*s.Summary, 50)
 		}
 
-		line := fmt.Sprintf("%s%s  %s  %s obs  %s",
+		promptInfo := ""
+		if s.PromptCount > 0 {
+			promptInfo = fmt.Sprintf("  %s prompts", statNumberStyle.Render(fmt.Sprintf("%d", s.PromptCount)))
+		}
+
+		line := fmt.Sprintf("%s%s  %s  %s obs%s  %s",
 			cursor,
 			projectStyle.Render(fmt.Sprintf("%-20s", s.Project)),
 			timestampStyle.Render(localTime(s.StartedAt)),
 			statNumberStyle.Render(fmt.Sprintf("%d", s.ObservationCount)),
+			promptInfo,
 			style.Render(summary))
 
 		b.WriteString(line)
@@ -525,7 +531,7 @@ func (m Model) viewSessions() string {
 	if m.FilterQuery != "" {
 		b.WriteString(helpStyle.Render("\n  ↑↓ navigate • enter details • esc clear filter • / filter"))
 	} else {
-		b.WriteString(helpStyle.Render("\n  ↑↓ navigate • enter details • d delete • / filter • esc back"))
+		b.WriteString(helpStyle.Render("\n  ↑↓ navigate • enter details • d delete • e clear empty • / filter • esc back"))
 	}
 
 	return b.String()
@@ -673,7 +679,7 @@ func (m Model) viewProjects() string {
 	if m.FilterQuery != "" {
 		b.WriteString(helpStyle.Render("\n  ↑↓ navigate • enter details • esc clear filter • / filter"))
 	} else {
-		b.WriteString(helpStyle.Render("\n  ↑↓ navigate • enter details • c clear sessions • d delete project • / filter • esc back"))
+		b.WriteString(helpStyle.Render("\n  ↑↓ navigate • enter details • c clear sessions • e clear empty • d delete project • / filter • esc back"))
 	}
 
 	return b.String()
@@ -768,10 +774,16 @@ func (m Model) viewProjectDetail() string {
 			summary = truncateStr(*s.Summary, 40)
 		}
 
-		line := fmt.Sprintf("%s%s  %s obs  %s",
+		promptInfo := ""
+		if s.PromptCount > 0 {
+			promptInfo = fmt.Sprintf("  %s prompts", statNumberStyle.Render(fmt.Sprintf("%d", s.PromptCount)))
+		}
+
+		line := fmt.Sprintf("%s%s  %s obs%s  %s",
 			cursor,
 			timestampStyle.Render(localTime(s.StartedAt)),
 			statNumberStyle.Render(fmt.Sprintf("%d", s.ObservationCount)),
+			promptInfo,
 			style.Render(summary))
 
 		b.WriteString(line)
@@ -786,7 +798,7 @@ func (m Model) viewProjectDetail() string {
 	if m.FilterQuery != "" {
 		b.WriteString(helpStyle.Render("\n  ↑↓ navigate • enter session • esc clear filter • / filter"))
 	} else {
-		b.WriteString(helpStyle.Render("\n  ↑↓ navigate • enter session • c clear sessions • D delete project • / filter • esc back"))
+		b.WriteString(helpStyle.Render("\n  ↑↓ navigate • enter session • c clear sessions • e clear empty • D delete project • / filter • esc back"))
 	}
 
 	return b.String()

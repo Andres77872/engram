@@ -178,6 +178,24 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.resetFilter()
 		return m, tea.Batch(loadStats(m.store), clearSuccessAfterDelay())
 
+	case emptySessionsDeletedMsg:
+		if msg.err != nil {
+			m.ErrorMsg = msg.err.Error()
+			return m, nil
+		}
+		m.ErrorMsg = ""
+		if msg.result != nil {
+			m.SuccessMsg = fmt.Sprintf("✓ %d empty sessions cleared", msg.result.SessionsDeleted)
+		} else {
+			m.SuccessMsg = "✓ Empty sessions cleared"
+		}
+		m.ConfirmActive = false
+		m.Cursor = 0
+		m.Scroll = 0
+		m.ProjectDetailScroll = 0
+		m.resetFilter()
+		return m, tea.Batch(m.reloadCurrentScreen(), loadStats(m.store), clearSuccessAfterDelay())
+
 	case projectsLoadedMsg:
 		if msg.err != nil {
 			m.ErrorMsg = msg.err.Error()
@@ -289,6 +307,8 @@ func (m Model) executeConfirmAction() (tea.Model, tea.Cmd) {
 		return m, clearProjectSessionsCmd(m.store, m.ConfirmTarget)
 	case ConfirmDeleteProject:
 		return m, deleteProjectCmd(m.store, m.ConfirmTarget)
+	case ConfirmDeleteEmptySessions:
+		return m, deleteEmptySessionsCmd(m.store, m.ConfirmTarget)
 	}
 	m.ConfirmActive = false
 	return m, nil
@@ -701,6 +721,25 @@ func (m Model) handleSessionsKeys(key string) (tea.Model, tea.Cmd) {
 			m.ConfirmTarget = sess.ID
 			return m, nil
 		}
+	case "e":
+		if m.FilterActive || m.FilterQuery != "" {
+			return m, nil // Block destructive keys when filter is active
+		}
+		emptyCount, err := m.store.CountEmptySessions("")
+		if err != nil {
+			m.ErrorMsg = fmt.Sprintf("Failed to count empty sessions: %v", err)
+			return m, nil
+		}
+		if emptyCount == 0 {
+			m.SuccessMsg = "No empty sessions to clear"
+			return m, clearSuccessAfterDelay()
+		}
+		m.ConfirmActive = true
+		m.ConfirmAction = ConfirmDeleteEmptySessions
+		m.ConfirmMsg = "Clear all empty sessions?"
+		m.ConfirmDetail = fmt.Sprintf("%d sessions with no observations, no prompts, no summary", emptyCount)
+		m.ConfirmTarget = "" // all projects
+		return m, nil
 	case "esc":
 		if m.FilterQuery != "" {
 			m.resetFilter()
@@ -861,6 +900,28 @@ func (m Model) handleProjectsKeys(key string) (tea.Model, tea.Cmd) {
 			m.ConfirmTarget = proj.Name
 			return m, nil
 		}
+	case "e":
+		if m.FilterActive || m.FilterQuery != "" {
+			return m, nil // Block destructive keys when filter is active
+		}
+		if len(m.Projects) > 0 && m.Cursor < len(m.Projects) {
+			proj := m.Projects[m.Cursor]
+			emptyCount, err := m.store.CountEmptySessions(proj.Name)
+			if err != nil {
+				m.ErrorMsg = fmt.Sprintf("Failed to count empty sessions: %v", err)
+				return m, nil
+			}
+			if emptyCount == 0 {
+				m.SuccessMsg = fmt.Sprintf("No empty sessions in %s", proj.Name)
+				return m, clearSuccessAfterDelay()
+			}
+			m.ConfirmActive = true
+			m.ConfirmAction = ConfirmDeleteEmptySessions
+			m.ConfirmMsg = fmt.Sprintf("Clear empty sessions for %s?", proj.Name)
+			m.ConfirmDetail = fmt.Sprintf("%d sessions with no observations, no prompts, no summary", emptyCount)
+			m.ConfirmTarget = proj.Name
+			return m, nil
+		}
 	case "esc":
 		if m.FilterQuery != "" {
 			m.resetFilter()
@@ -941,6 +1002,28 @@ func (m Model) handleProjectDetailKeys(key string) (tea.Model, tea.Cmd) {
 			m.ConfirmAction = ConfirmDeleteProject
 			m.ConfirmMsg = "DELETE ENTIRE PROJECT?"
 			m.ConfirmDetail = fmt.Sprintf("Project: %s — This cannot be undone!", proj.Name)
+			m.ConfirmTarget = proj.Name
+			return m, nil
+		}
+	case "e":
+		if m.FilterActive || m.FilterQuery != "" {
+			return m, nil // Block destructive keys when filter is active
+		}
+		if m.SelectedProjectIdx < len(m.Projects) {
+			proj := m.Projects[m.SelectedProjectIdx]
+			emptyCount, err := m.store.CountEmptySessions(proj.Name)
+			if err != nil {
+				m.ErrorMsg = fmt.Sprintf("Failed to count empty sessions: %v", err)
+				return m, nil
+			}
+			if emptyCount == 0 {
+				m.SuccessMsg = fmt.Sprintf("No empty sessions in %s", proj.Name)
+				return m, clearSuccessAfterDelay()
+			}
+			m.ConfirmActive = true
+			m.ConfirmAction = ConfirmDeleteEmptySessions
+			m.ConfirmMsg = fmt.Sprintf("Clear empty sessions for %s?", proj.Name)
+			m.ConfirmDetail = fmt.Sprintf("%d sessions with no observations, no prompts, no summary", emptyCount)
 			m.ConfirmTarget = proj.Name
 			return m, nil
 		}
