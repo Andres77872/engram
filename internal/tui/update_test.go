@@ -1102,3 +1102,483 @@ func TestSetupAllowlistPromptFlow(t *testing.T) {
 		}
 	})
 }
+
+// ─── Filter Tests ────────────────────────────────────────────────────────────
+
+func TestFilterActivationOnSlashKey(t *testing.T) {
+	t.Run("projects screen", func(t *testing.T) {
+		m := New(nil, "")
+		m.Screen = ScreenProjects
+		m.Projects = []store.ProjectStats{{Name: "engram"}, {Name: "opencode"}}
+		m.Cursor = 1
+
+		updatedModel, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'/'}})
+		updated := updatedModel.(Model)
+
+		if !updated.FilterActive {
+			t.Fatal("/ should activate filter")
+		}
+		if !updated.FilterInput.Focused() {
+			t.Fatal("filter input should be focused")
+		}
+		if updated.Cursor != 0 {
+			t.Fatal("cursor should reset to 0")
+		}
+		if cmd != nil {
+			t.Fatal("/ activation should not return command")
+		}
+	})
+
+	t.Run("sessions screen", func(t *testing.T) {
+		m := New(nil, "")
+		m.Screen = ScreenSessions
+		m.Sessions = []store.SessionSummary{{ID: "s1"}}
+		m.Cursor = 0
+
+		updatedModel, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'/'}})
+		updated := updatedModel.(Model)
+
+		if !updated.FilterActive {
+			t.Fatal("/ should activate filter on sessions")
+		}
+		if !updated.FilterInput.Focused() {
+			t.Fatal("filter input should be focused")
+		}
+	})
+
+	t.Run("project detail screen", func(t *testing.T) {
+		m := New(nil, "")
+		m.Screen = ScreenProjectDetail
+		m.Projects = []store.ProjectStats{{Name: "engram"}}
+		m.SelectedProjectIdx = 0
+		m.ProjectSessions = []store.SessionSummary{{ID: "s1"}}
+
+		updatedModel, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'/'}})
+		updated := updatedModel.(Model)
+
+		if !updated.FilterActive {
+			t.Fatal("/ should activate filter on project detail")
+		}
+	})
+}
+
+func TestFilterInputEscCancelsFilter(t *testing.T) {
+	fx := newTestFixture(t)
+	m := New(fx.store, "")
+	m.Screen = ScreenProjects
+	m.Projects = []store.ProjectStats{{Name: "engram"}}
+	m.FilterActive = true
+	m.FilterInput.Focus()
+	m.FilterInput.SetValue("eng")
+
+	updatedModel, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	updated := updatedModel.(Model)
+
+	if updated.FilterActive {
+		t.Fatal("esc should deactivate filter")
+	}
+	if updated.FilterQuery != "" {
+		t.Fatal("esc should clear filter query")
+	}
+	if updated.FilterInput.Value() != "" {
+		t.Fatal("esc should clear filter input value")
+	}
+	if updated.FilterInput.Focused() {
+		t.Fatal("esc should blur filter input")
+	}
+	if cmd == nil {
+		t.Fatal("esc should return reload command")
+	}
+}
+
+func TestFilterInputEnterConfirmsFilter(t *testing.T) {
+	m := New(nil, "")
+	m.Screen = ScreenSessions
+	m.FilterActive = true
+	m.FilterInput.Focus()
+	m.FilterInput.SetValue("engram")
+
+	updatedModel, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	updated := updatedModel.(Model)
+
+	if updated.FilterActive {
+		t.Fatal("enter should deactivate filter input mode")
+	}
+	if updated.FilterQuery != "engram" {
+		t.Fatalf("enter should keep filter query, got %q", updated.FilterQuery)
+	}
+	if updated.FilterInput.Focused() {
+		t.Fatal("enter should blur filter input")
+	}
+}
+
+func TestFilterBlocksDestructiveKeys(t *testing.T) {
+	t.Run("projects d blocked when filtered", func(t *testing.T) {
+		m := New(nil, "")
+		m.Screen = ScreenProjects
+		m.Projects = []store.ProjectStats{{Name: "engram", SessionCount: 1, ObservationCount: 1}}
+		m.FilterQuery = "eng"
+
+		updatedModel, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'d'}})
+		updated := updatedModel.(Model)
+
+		if updated.ConfirmActive {
+			t.Fatal("d should NOT activate confirm when filter is active")
+		}
+		if cmd != nil {
+			t.Fatal("d should not return command when filter is active")
+		}
+	})
+
+	t.Run("projects c blocked when filtered", func(t *testing.T) {
+		m := New(nil, "")
+		m.Screen = ScreenProjects
+		m.Projects = []store.ProjectStats{{Name: "engram", SessionCount: 1}}
+		m.FilterQuery = "eng"
+
+		updatedModel, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'c'}})
+		updated := updatedModel.(Model)
+
+		if updated.ConfirmActive {
+			t.Fatal("c should NOT activate confirm when filter is active")
+		}
+	})
+
+	t.Run("sessions d blocked when filtered", func(t *testing.T) {
+		m := New(nil, "")
+		m.Screen = ScreenSessions
+		m.Sessions = []store.SessionSummary{{ID: "s1", Project: "engram"}}
+		m.FilterQuery = "eng"
+
+		updatedModel, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'d'}})
+		updated := updatedModel.(Model)
+
+		if updated.ConfirmActive {
+			t.Fatal("d should NOT activate confirm when filter is active")
+		}
+	})
+
+	t.Run("project detail c blocked when filtered", func(t *testing.T) {
+		m := New(nil, "")
+		m.Screen = ScreenProjectDetail
+		m.Projects = []store.ProjectStats{{Name: "engram", SessionCount: 1}}
+		m.SelectedProjectIdx = 0
+		m.FilterQuery = "eng"
+
+		updatedModel, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'c'}})
+		updated := updatedModel.(Model)
+
+		if updated.ConfirmActive {
+			t.Fatal("c should NOT activate confirm when filter is active on project detail")
+		}
+	})
+
+	t.Run("project detail D blocked when filtered", func(t *testing.T) {
+		m := New(nil, "")
+		m.Screen = ScreenProjectDetail
+		m.Projects = []store.ProjectStats{{Name: "engram"}}
+		m.SelectedProjectIdx = 0
+		m.FilterQuery = "eng"
+
+		updatedModel, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'D'}})
+		updated := updatedModel.(Model)
+
+		if updated.ConfirmActive {
+			t.Fatal("D should NOT activate confirm when filter is active on project detail")
+		}
+	})
+}
+
+func TestFilterResetOnScreenTransition(t *testing.T) {
+	t.Run("entering project detail resets filter", func(t *testing.T) {
+		fx := newTestFixture(t)
+		m := New(fx.store, "")
+		m.Screen = ScreenProjects
+		m.Projects = []store.ProjectStats{{Name: "engram"}}
+		m.FilterQuery = "eng"
+		m.FilterActive = false
+		m.Cursor = 0
+
+		updatedModel, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+		updated := updatedModel.(Model)
+
+		if updated.FilterActive {
+			t.Fatal("entering project detail should reset filter active")
+		}
+		if updated.FilterQuery != "" {
+			t.Fatal("entering project detail should clear filter query")
+		}
+	})
+
+	t.Run("entering session detail from sessions resets filter", func(t *testing.T) {
+		fx := newTestFixture(t)
+		m := New(fx.store, "")
+		m.Screen = ScreenSessions
+		m.Sessions = []store.SessionSummary{{ID: fx.sessionID, Project: "engram"}}
+		m.FilterQuery = "eng"
+		m.Cursor = 0
+
+		updatedModel, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+		updated := updatedModel.(Model)
+
+		if updated.FilterQuery != "" {
+			t.Fatal("entering session detail should clear filter query")
+		}
+	})
+}
+
+func TestFilteredMessagesUpdateData(t *testing.T) {
+	t.Run("filteredProjectsMsg updates projects", func(t *testing.T) {
+		m := New(nil, "")
+		m.Screen = ScreenProjects
+		m.Projects = []store.ProjectStats{{Name: "old"}}
+
+		updatedModel, _ := m.Update(filteredProjectsMsg{
+			projects: []store.ProjectStats{{Name: "filtered"}},
+		})
+		updated := updatedModel.(Model)
+
+		if len(updated.Projects) != 1 || updated.Projects[0].Name != "filtered" {
+			t.Fatal("filteredProjectsMsg should update projects list")
+		}
+		if updated.Cursor != 0 {
+			t.Fatal("cursor should reset on filter results")
+		}
+	})
+
+	t.Run("filteredSessionsMsg updates sessions", func(t *testing.T) {
+		m := New(nil, "")
+		m.Screen = ScreenSessions
+		m.Sessions = []store.SessionSummary{{ID: "old"}}
+
+		updatedModel, _ := m.Update(filteredSessionsMsg{
+			sessions: []store.SessionSummary{{ID: "filtered"}},
+		})
+		updated := updatedModel.(Model)
+
+		if len(updated.Sessions) != 1 || updated.Sessions[0].ID != "filtered" {
+			t.Fatal("filteredSessionsMsg should update sessions list on ScreenSessions")
+		}
+	})
+
+	t.Run("filteredSessionsMsg updates project sessions on project detail", func(t *testing.T) {
+		m := New(nil, "")
+		m.Screen = ScreenProjectDetail
+		m.ProjectSessions = []store.SessionSummary{{ID: "old"}}
+
+		updatedModel, _ := m.Update(filteredSessionsMsg{
+			sessions: []store.SessionSummary{{ID: "filtered"}},
+		})
+		updated := updatedModel.(Model)
+
+		if len(updated.ProjectSessions) != 1 || updated.ProjectSessions[0].ID != "filtered" {
+			t.Fatal("filteredSessionsMsg should update project sessions on ScreenProjectDetail")
+		}
+	})
+
+	t.Run("filteredProjectsMsg with error sets error", func(t *testing.T) {
+		m := New(nil, "")
+		m.Screen = ScreenProjects
+
+		updatedModel, _ := m.Update(filteredProjectsMsg{
+			err: errors.New("db error"),
+		})
+		updated := updatedModel.(Model)
+
+		if updated.ErrorMsg != "db error" {
+			t.Fatal("filteredProjectsMsg error should set ErrorMsg")
+		}
+	})
+}
+
+func TestFilterDataLoadCommands(t *testing.T) {
+	fx := newTestFixture(t)
+
+	t.Run("filterProjects", func(t *testing.T) {
+		msg := filterProjects(fx.store, "engram")()
+		loaded, ok := msg.(filteredProjectsMsg)
+		if !ok {
+			t.Fatalf("message type = %T", msg)
+		}
+		if loaded.err != nil {
+			t.Fatalf("unexpected error: %v", loaded.err)
+		}
+		if len(loaded.projects) == 0 {
+			t.Fatal("expected at least one filtered project")
+		}
+	})
+
+	t.Run("filterSessions", func(t *testing.T) {
+		msg := filterSessions(fx.store, "engram", "", 50)()
+		loaded, ok := msg.(filteredSessionsMsg)
+		if !ok {
+			t.Fatalf("message type = %T", msg)
+		}
+		if loaded.err != nil {
+			t.Fatalf("unexpected error: %v", loaded.err)
+		}
+		if len(loaded.sessions) == 0 {
+			t.Fatal("expected at least one filtered session")
+		}
+	})
+}
+
+func TestFilterBlocksDestructiveKeysWhenActive(t *testing.T) {
+	t.Run("sessions d blocked when FilterActive with empty FilterQuery", func(t *testing.T) {
+		m := New(nil, "")
+		m.Screen = ScreenSessions
+		m.Sessions = []store.SessionSummary{{ID: "s1", Project: "engram", ObservationCount: 1}}
+		m.FilterActive = true
+		m.FilterQuery = ""
+
+		updatedModel, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'d'}})
+		updated := updatedModel.(Model)
+
+		if updated.ConfirmActive {
+			t.Fatal("d should NOT activate confirm when FilterActive is true even if FilterQuery is empty")
+		}
+		if cmd != nil {
+			t.Fatal("d should not return command when FilterActive is true")
+		}
+	})
+
+	t.Run("projects d blocked when FilterActive with empty FilterQuery", func(t *testing.T) {
+		m := New(nil, "")
+		m.Screen = ScreenProjects
+		m.Projects = []store.ProjectStats{{Name: "engram", SessionCount: 1, ObservationCount: 1}}
+		m.FilterActive = true
+		m.FilterQuery = ""
+
+		updatedModel, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'d'}})
+		updated := updatedModel.(Model)
+
+		if updated.ConfirmActive {
+			t.Fatal("d should NOT activate confirm when FilterActive is true even if FilterQuery is empty")
+		}
+		if cmd != nil {
+			t.Fatal("d should not return command when FilterActive is true")
+		}
+	})
+
+	t.Run("projects c blocked when FilterActive with empty FilterQuery", func(t *testing.T) {
+		m := New(nil, "")
+		m.Screen = ScreenProjects
+		m.Projects = []store.ProjectStats{{Name: "engram", SessionCount: 1}}
+		m.FilterActive = true
+		m.FilterQuery = ""
+
+		updatedModel, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'c'}})
+		updated := updatedModel.(Model)
+
+		if updated.ConfirmActive {
+			t.Fatal("c should NOT activate confirm when FilterActive is true even if FilterQuery is empty")
+		}
+		if cmd != nil {
+			t.Fatal("c should not return command when FilterActive is true")
+		}
+	})
+
+	t.Run("project detail c blocked when FilterActive with empty FilterQuery", func(t *testing.T) {
+		m := New(nil, "")
+		m.Screen = ScreenProjectDetail
+		m.Projects = []store.ProjectStats{{Name: "engram", SessionCount: 1}}
+		m.SelectedProjectIdx = 0
+		m.FilterActive = true
+		m.FilterQuery = ""
+
+		updatedModel, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'c'}})
+		updated := updatedModel.(Model)
+
+		if updated.ConfirmActive {
+			t.Fatal("c should NOT activate confirm when FilterActive is true even if FilterQuery is empty")
+		}
+		if cmd != nil {
+			t.Fatal("c should not return command when FilterActive is true")
+		}
+	})
+
+	t.Run("project detail D blocked when FilterActive with empty FilterQuery", func(t *testing.T) {
+		m := New(nil, "")
+		m.Screen = ScreenProjectDetail
+		m.Projects = []store.ProjectStats{{Name: "engram"}}
+		m.SelectedProjectIdx = 0
+		m.FilterActive = true
+		m.FilterQuery = ""
+
+		updatedModel, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'D'}})
+		updated := updatedModel.(Model)
+
+		if updated.ConfirmActive {
+			t.Fatal("D should NOT activate confirm when FilterActive is true even if FilterQuery is empty")
+		}
+		if cmd != nil {
+			t.Fatal("D should not return command when FilterActive is true")
+		}
+	})
+}
+
+func TestFilterNotActivatedDuringConfirm(t *testing.T) {
+	t.Run("projects screen ignores / when ConfirmActive", func(t *testing.T) {
+		m := New(nil, "")
+		m.Screen = ScreenProjects
+		m.Projects = []store.ProjectStats{{Name: "engram"}}
+		m.ConfirmActive = true
+		m.ConfirmAction = ConfirmDeleteProject
+
+		updatedModel, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'/'}})
+		updated := updatedModel.(Model)
+
+		if updated.FilterActive {
+			t.Fatal("/ should NOT activate filter when ConfirmActive is true")
+		}
+		if updated.ConfirmAction != ConfirmDeleteProject {
+			t.Fatal("confirm state should be preserved")
+		}
+		if cmd != nil {
+			t.Fatal("/ should not return command when ConfirmActive")
+		}
+	})
+
+	t.Run("sessions screen ignores / when ConfirmActive", func(t *testing.T) {
+		m := New(nil, "")
+		m.Screen = ScreenSessions
+		m.Sessions = []store.SessionSummary{{ID: "s1"}}
+		m.ConfirmActive = true
+		m.ConfirmAction = ConfirmDeleteSession
+
+		updatedModel, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'/'}})
+		updated := updatedModel.(Model)
+
+		if updated.FilterActive {
+			t.Fatal("/ should NOT activate filter when ConfirmActive is true")
+		}
+		if updated.ConfirmAction != ConfirmDeleteSession {
+			t.Fatal("confirm state should be preserved")
+		}
+		if cmd != nil {
+			t.Fatal("/ should not return command when ConfirmActive")
+		}
+	})
+
+	t.Run("project detail screen ignores / when ConfirmActive", func(t *testing.T) {
+		m := New(nil, "")
+		m.Screen = ScreenProjectDetail
+		m.Projects = []store.ProjectStats{{Name: "engram"}}
+		m.SelectedProjectIdx = 0
+		m.ConfirmActive = true
+		m.ConfirmAction = ConfirmClearProjectSessions
+
+		updatedModel, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'/'}})
+		updated := updatedModel.(Model)
+
+		if updated.FilterActive {
+			t.Fatal("/ should NOT activate filter when ConfirmActive is true")
+		}
+		if updated.ConfirmAction != ConfirmClearProjectSessions {
+			t.Fatal("confirm state should be preserved")
+		}
+		if cmd != nil {
+			t.Fatal("/ should not return command when ConfirmActive")
+		}
+	})
+}

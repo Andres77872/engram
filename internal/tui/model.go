@@ -124,6 +124,16 @@ type projectDetailSessionsMsg struct {
 	err      error
 }
 
+type filteredProjectsMsg struct {
+	projects []store.ProjectStats
+	err      error
+}
+
+type filteredSessionsMsg struct {
+	sessions []store.SessionSummary
+	err      error
+}
+
 // ─── Model ───────────────────────────────────────────────────────────────────
 
 type Model struct {
@@ -180,6 +190,11 @@ type Model struct {
 	ProjectSessions     []store.SessionSummary
 	ProjectDetailScroll int
 
+	// Inline filter (shared across Projects, Sessions, ProjectDetail)
+	FilterInput  textinput.Model
+	FilterActive bool
+	FilterQuery  string
+
 	// Setup
 	SetupAgents           []setup.Agent
 	SetupResult           *setup.Result
@@ -200,6 +215,11 @@ func New(s *store.Store, version string) Model {
 	ti.CharLimit = 256
 	ti.Width = 60
 
+	fi := textinput.New()
+	fi.Placeholder = "Filter..."
+	fi.CharLimit = 128
+	fi.Width = 40
+
 	sp := spinner.New()
 	sp.Spinner = spinner.Dot
 	sp.Style = lipgloss.NewStyle().Foreground(colorLavender)
@@ -209,6 +229,7 @@ func New(s *store.Store, version string) Model {
 		Version:      version,
 		Screen:       ScreenDashboard,
 		SearchInput:  ti,
+		FilterInput:  fi,
 		SetupSpinner: sp,
 	}
 }
@@ -324,6 +345,20 @@ func loadProjectSessions(s *store.Store, project string, limit int) tea.Cmd {
 	return func() tea.Msg {
 		sessions, err := s.ProjectSessions(project, limit)
 		return projectDetailSessionsMsg{sessions: sessions, err: err}
+	}
+}
+
+func filterProjects(s *store.Store, query string) tea.Cmd {
+	return func() tea.Msg {
+		projects, err := s.FilterProjects(query)
+		return filteredProjectsMsg{projects: projects, err: err}
+	}
+}
+
+func filterSessions(s *store.Store, query string, project string, limit int) tea.Cmd {
+	return func() tea.Msg {
+		sessions, err := s.FilterSessions(query, project, limit)
+		return filteredSessionsMsg{sessions: sessions, err: err}
 	}
 }
 

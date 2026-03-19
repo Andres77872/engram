@@ -4439,3 +4439,127 @@ func TestCountObservationsForProject(t *testing.T) {
 		t.Errorf("expected 0 for beta, got %d", count)
 	}
 }
+
+// ─── Filter Tests ────────────────────────────────────────────────────────────
+
+func setupFilterTestData(t *testing.T) *Store {
+	t.Helper()
+	s := newTestStore(t)
+
+	s.CreateSession("s1", "engram", "/tmp/engram")
+	s.CreateSession("s2", "opencode", "/tmp/opencode")
+	s.CreateSession("s3", "engram", "/tmp/engram")
+
+	s.AddObservation(AddObservationParams{
+		SessionID: "s1", Type: "decision", Title: "arch choice",
+		Content: "content", Project: "engram", Scope: "project",
+	})
+	s.AddObservation(AddObservationParams{
+		SessionID: "s2", Type: "bugfix", Title: "fix crash",
+		Content: "content", Project: "opencode", Scope: "project",
+	})
+
+	// End s1 with a summary
+	s.EndSession("s1", "implemented filter feature")
+
+	return s
+}
+
+func TestFilterProjectsMatchesPartialName(t *testing.T) {
+	s := setupFilterTestData(t)
+
+	results, err := s.FilterProjects("eng")
+	if err != nil {
+		t.Fatalf("FilterProjects: %v", err)
+	}
+	if len(results) != 1 {
+		t.Fatalf("expected 1 project, got %d", len(results))
+	}
+	if results[0].Name != "engram" {
+		t.Fatalf("expected engram, got %s", results[0].Name)
+	}
+}
+
+func TestFilterProjectsCaseInsensitive(t *testing.T) {
+	s := setupFilterTestData(t)
+
+	results, err := s.FilterProjects("OPEN")
+	if err != nil {
+		t.Fatalf("FilterProjects: %v", err)
+	}
+	if len(results) != 1 {
+		t.Fatalf("expected 1 project, got %d", len(results))
+	}
+	if results[0].Name != "opencode" {
+		t.Fatalf("expected opencode, got %s", results[0].Name)
+	}
+}
+
+func TestFilterProjectsNoMatch(t *testing.T) {
+	s := setupFilterTestData(t)
+
+	results, err := s.FilterProjects("nonexistent")
+	if err != nil {
+		t.Fatalf("FilterProjects: %v", err)
+	}
+	if len(results) != 0 {
+		t.Fatalf("expected 0 projects, got %d", len(results))
+	}
+}
+
+func TestFilterProjectsEmptyQueryReturnsAll(t *testing.T) {
+	s := setupFilterTestData(t)
+
+	results, err := s.FilterProjects("")
+	if err != nil {
+		t.Fatalf("FilterProjects: %v", err)
+	}
+	if len(results) < 2 {
+		t.Fatalf("expected at least 2 projects, got %d", len(results))
+	}
+}
+
+func TestFilterSessionsMatchesSummary(t *testing.T) {
+	s := setupFilterTestData(t)
+
+	results, err := s.FilterSessions("filter feature", "", 50)
+	if err != nil {
+		t.Fatalf("FilterSessions: %v", err)
+	}
+	if len(results) != 1 {
+		t.Fatalf("expected 1 session, got %d", len(results))
+	}
+	if results[0].ID != "s1" {
+		t.Fatalf("expected s1, got %s", results[0].ID)
+	}
+}
+
+func TestFilterSessionsMatchesProject(t *testing.T) {
+	s := setupFilterTestData(t)
+
+	results, err := s.FilterSessions("opencode", "", 50)
+	if err != nil {
+		t.Fatalf("FilterSessions: %v", err)
+	}
+	if len(results) != 1 {
+		t.Fatalf("expected 1 session, got %d", len(results))
+	}
+	if results[0].Project != "opencode" {
+		t.Fatalf("expected opencode, got %s", results[0].Project)
+	}
+}
+
+func TestFilterSessionsScopedToProject(t *testing.T) {
+	s := setupFilterTestData(t)
+
+	// Filter by "s" which matches all session IDs, but scope to "engram"
+	results, err := s.FilterSessions("s", "engram", 50)
+	if err != nil {
+		t.Fatalf("FilterSessions: %v", err)
+	}
+	for _, r := range results {
+		if r.Project != "engram" {
+			t.Fatalf("expected all results scoped to engram, got %s", r.Project)
+		}
+	}
+}
