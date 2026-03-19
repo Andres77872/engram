@@ -1575,3 +1575,181 @@ func TestFilterNotActivatedDuringConfirm(t *testing.T) {
 		}
 	})
 }
+
+// ─── Clear Empty Sessions ────────────────────────────────────────────────────
+
+func TestClearEmptySessionsKeyActivatesConfirm(t *testing.T) {
+	fx := newTestFixture(t)
+	// Create an empty session (no observations, no prompts, no summary)
+	if err := fx.store.CreateSession("empty-session", "engram", "/tmp/engram"); err != nil {
+		t.Fatalf("create empty session: %v", err)
+	}
+
+	m := New(fx.store, "")
+	m.Screen = ScreenSessions
+	m.Height = 20
+
+	updatedModel, _ := m.handleSessionsKeys("e")
+	updated := updatedModel.(Model)
+
+	if !updated.ConfirmActive {
+		t.Fatal("e should activate confirmation dialog")
+	}
+	if updated.ConfirmAction != ConfirmDeleteEmptySessions {
+		t.Fatal("confirm action should be ConfirmDeleteEmptySessions")
+	}
+	if updated.ConfirmTarget != "" {
+		t.Fatal("sessions screen should target all projects (empty string)")
+	}
+}
+
+func TestClearEmptySessionsNoEmptyShowsMessage(t *testing.T) {
+	// Create a fresh store with no empty sessions
+	cfg, err := store.DefaultConfig()
+	if err != nil {
+		t.Fatalf("DefaultConfig: %v", err)
+	}
+	cfg.DataDir = t.TempDir()
+	s, err := store.New(cfg)
+	if err != nil {
+		t.Fatalf("create store: %v", err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+
+	// Create a session with an observation (not empty)
+	if err := s.CreateSession("non-empty-session", "engram", "/tmp/engram"); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	_, err = s.AddObservation(store.AddObservationParams{
+		SessionID: "non-empty-session",
+		Type:      "bugfix",
+		Title:     "Test observation",
+		Content:   "content",
+		Project:   "engram",
+		Scope:     "project",
+	})
+	if err != nil {
+		t.Fatalf("add observation: %v", err)
+	}
+
+	m := New(s, "")
+	m.Screen = ScreenSessions
+	m.Height = 20
+
+	updatedModel, cmd := m.handleSessionsKeys("e")
+	updated := updatedModel.(Model)
+
+	if updated.ConfirmActive {
+		t.Fatal("e with no empty sessions should NOT activate confirm")
+	}
+	if updated.SuccessMsg != "No empty sessions to clear" {
+		t.Fatalf("expected success message, got %q", updated.SuccessMsg)
+	}
+	if cmd == nil {
+		t.Fatal("should return clearSuccessAfterDelay command")
+	}
+}
+
+func TestClearEmptySessionsBlockedDuringFilter(t *testing.T) {
+	fx := newTestFixture(t)
+	m := New(fx.store, "")
+	m.Screen = ScreenSessions
+	m.Height = 20
+	m.FilterQuery = "something"
+
+	updatedModel, cmd := m.handleSessionsKeys("e")
+	updated := updatedModel.(Model)
+
+	if updated.ConfirmActive {
+		t.Fatal("e should be blocked when filter is active")
+	}
+	if cmd != nil {
+		t.Fatal("should not return command when filter is active")
+	}
+}
+
+func TestClearEmptySessionsProjectDetailKey(t *testing.T) {
+	fx := newTestFixture(t)
+	// Create an empty session for the engram project
+	if err := fx.store.CreateSession("empty-in-engram", "engram", "/tmp/engram"); err != nil {
+		t.Fatalf("create empty session: %v", err)
+	}
+
+	m := New(fx.store, "")
+	m.Screen = ScreenProjectDetail
+	m.Height = 20
+	m.Projects = []store.ProjectStats{{Name: "engram"}}
+	m.SelectedProjectIdx = 0
+
+	updatedModel, _ := m.handleProjectDetailKeys("e")
+	updated := updatedModel.(Model)
+
+	if !updated.ConfirmActive {
+		t.Fatal("e should activate confirmation in project detail")
+	}
+	if updated.ConfirmTarget != "engram" {
+		t.Fatalf("expected target 'engram', got %q", updated.ConfirmTarget)
+	}
+}
+
+func TestClearEmptySessionsProjectsKey(t *testing.T) {
+	fx := newTestFixture(t)
+	m := New(fx.store, "")
+	m.Screen = ScreenProjects
+	m.Height = 20
+	m.Projects = []store.ProjectStats{{Name: "engram", SessionCount: 2}}
+	m.Cursor = 0
+
+	updatedModel, _ := m.handleProjectsKeys("e")
+	updated := updatedModel.(Model)
+
+	// The fixture has sessions with observations, so they may or may not be empty
+	// depending on fixture setup. Test that the key is handled (no panic).
+	_ = updated
+}
+
+func TestEmptySessionsDeletedMsgRefreshes(t *testing.T) {
+	fx := newTestFixture(t)
+	m := New(fx.store, "")
+	m.Screen = ScreenSessions
+	m.ConfirmActive = true
+
+	result := &store.DeleteResult{SessionsDeleted: 5}
+	updatedModel, cmd := m.Update(emptySessionsDeletedMsg{result: result})
+	updated := updatedModel.(Model)
+
+	if updated.ConfirmActive {
+		t.Fatal("confirm should be deactivated after delete")
+	}
+	if updated.SuccessMsg != "✓ 5 empty sessions cleared" {
+		t.Fatalf("expected success message, got %q", updated.SuccessMsg)
+	}
+	if cmd == nil {
+		t.Fatal("should return batch command for refresh")
+	}
+}
+
+func TestEmptySessionsDeletedMsgError(t *testing.T) {
+	m := New(nil, "")
+	m.Screen = ScreenSessions
+
+	updatedModel, _ := m.Update(emptySessionsDeletedMsg{err: errors.New("db error")})
+	updated := updatedModel.(Model)
+
+	if updated.ErrorMsg != "db error" {
+		t.Fatalf("expected error message, got %q", updated.ErrorMsg)
+	}
+}
+
+func TestExecuteConfirmActionDeleteEmptySessions(t *testing.T) {
+	fx := newTestFixture(t)
+	m := New(fx.store, "")
+	m.ConfirmActive = true
+	m.ConfirmAction = ConfirmDeleteEmptySessions
+	m.ConfirmTarget = "engram"
+
+	_, cmd := m.executeConfirmAction()
+	if cmd == nil {
+		t.Fatal("executeConfirmAction for ConfirmDeleteEmptySessions should return a command")
+	}
+}

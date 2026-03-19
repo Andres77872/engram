@@ -797,3 +797,94 @@ func TestViewProjectDetailFilterUI(t *testing.T) {
 		}
 	})
 }
+
+// ─── PromptCount Display ─────────────────────────────────────────────────────
+
+func TestViewSessionsShowsPromptCount(t *testing.T) {
+	m := New(nil, "")
+	m.Height = 20
+	m.Sessions = []store.SessionSummary{
+		{ID: "s1", Project: "engram", StartedAt: "2026-01-01", ObservationCount: 3, PromptCount: 5},
+		{ID: "s2", Project: "engram", StartedAt: "2026-01-01", ObservationCount: 1, PromptCount: 0},
+	}
+
+	out := m.viewSessions()
+	if !strings.Contains(out, "5") || !strings.Contains(out, "prompts") {
+		t.Fatal("sessions view should show prompt count when > 0")
+	}
+}
+
+func TestViewSessionsHidesZeroPromptCount(t *testing.T) {
+	m := New(nil, "")
+	m.Height = 20
+	m.Sessions = []store.SessionSummary{
+		{ID: "s1", Project: "engram", StartedAt: "2026-01-01", ObservationCount: 1, PromptCount: 0},
+	}
+
+	out := m.viewSessions()
+	if strings.Contains(out, "prompts") {
+		t.Fatal("sessions view should NOT show 'prompts' when count is 0")
+	}
+}
+
+func TestViewProjectDetailShowsPromptCount(t *testing.T) {
+	m := New(nil, "")
+	m.Height = 20
+	m.Projects = []store.ProjectStats{
+		{Name: "engram", SessionCount: 1, ObservationCount: 5, PromptCount: 10, LastActivityAt: "2026-01-01"},
+	}
+	m.SelectedProjectIdx = 0
+	m.ProjectSessions = []store.SessionSummary{
+		{ID: "s1", Project: "engram", StartedAt: "2026-01-01", ObservationCount: 2, PromptCount: 7},
+	}
+
+	out := m.viewProjectDetail()
+	if !strings.Contains(out, "7") || !strings.Contains(out, "prompts") {
+		t.Fatal("project detail should show prompt count in session line when > 0")
+	}
+}
+
+// ─── Clear Empty Help Bars ───────────────────────────────────────────────────
+
+func TestViewSessionsHelpBarIncludesClearEmpty(t *testing.T) {
+	m := New(nil, "")
+	m.Height = 20
+	m.Sessions = []store.SessionSummary{
+		{ID: "s1", Project: "engram", StartedAt: "2026-01-01", ObservationCount: 1},
+	}
+
+	out := m.viewSessions()
+	if !strings.Contains(out, "e clear empty") {
+		t.Fatal("sessions help bar should include 'e clear empty'")
+	}
+}
+
+func TestViewProjectDetailHelpBarIncludesClearEmpty(t *testing.T) {
+	m := New(nil, "")
+	m.Height = 20
+	m.Projects = []store.ProjectStats{
+		{Name: "engram", SessionCount: 1, ObservationCount: 5, PromptCount: 10, LastActivityAt: "2026-01-01"},
+	}
+	m.SelectedProjectIdx = 0
+	m.ProjectSessions = []store.SessionSummary{
+		{ID: "s1", Project: "engram", StartedAt: "2026-01-01", ObservationCount: 1},
+	}
+
+	out := m.viewProjectDetail()
+	if !strings.Contains(out, "e clear empty") {
+		t.Fatal("project detail help bar should include 'e clear empty'")
+	}
+}
+
+func TestViewProjectsHelpBarIncludesClearEmpty(t *testing.T) {
+	m := New(nil, "")
+	m.Height = 20
+	m.Projects = []store.ProjectStats{
+		{Name: "engram", SessionCount: 3, ObservationCount: 10, PromptCount: 5, LastActivityAt: "2026-01-01"},
+	}
+
+	out := m.viewProjects()
+	if !strings.Contains(out, "e clear empty") {
+		t.Fatal("projects help bar should include 'e clear empty'")
+	}
+}

@@ -102,6 +102,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /sessions/{id}/end", s.handleEndSession)
 	s.mux.HandleFunc("GET /sessions/recent", s.handleRecentSessions)
 	s.mux.HandleFunc("DELETE /sessions/{id}", s.handleDeleteSession)
+	s.mux.HandleFunc("DELETE /sessions/empty", s.handleDeleteEmptySessions)
 	s.mux.HandleFunc("DELETE /sessions/project/{project}", s.handleClearProjectSessions)
 
 	// Observations
@@ -229,6 +230,19 @@ func (s *Server) handleClearProjectSessions(w http.ResponseWriter, r *http.Reque
 	}
 
 	result, err := s.store.ClearProjectSessions(project)
+	if err != nil {
+		jsonError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	s.notifyWrite()
+	jsonResponse(w, http.StatusOK, result)
+}
+
+func (s *Server) handleDeleteEmptySessions(w http.ResponseWriter, r *http.Request) {
+	project := r.URL.Query().Get("project")
+
+	result, err := s.store.DeleteEmptySessions(project)
 	if err != nil {
 		jsonError(w, http.StatusInternalServerError, err.Error())
 		return

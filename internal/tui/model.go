@@ -49,6 +49,7 @@ const (
 	ConfirmDeleteSession
 	ConfirmClearProjectSessions
 	ConfirmDeleteProject
+	ConfirmDeleteEmptySessions
 )
 
 // ─── Custom Messages ─────────────────────────────────────────────────────────
@@ -108,6 +109,11 @@ type projectSessionsClearedMsg struct {
 }
 
 type projectDeletedMsg struct {
+	result *store.DeleteResult
+	err    error
+}
+
+type emptySessionsDeletedMsg struct {
 	result *store.DeleteResult
 	err    error
 }
@@ -321,6 +327,13 @@ func deleteProjectCmd(s *store.Store, project string) tea.Cmd {
 	return func() tea.Msg {
 		result, err := s.DeleteProject(project)
 		return projectDeletedMsg{result: result, err: err}
+	}
+}
+
+func deleteEmptySessionsCmd(s *store.Store, project string) tea.Cmd {
+	return func() tea.Msg {
+		result, err := s.DeleteEmptySessions(project)
+		return emptySessionsDeletedMsg{result: result, err: err}
 	}
 }
 
