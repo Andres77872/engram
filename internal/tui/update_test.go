@@ -184,6 +184,17 @@ func TestHandleDashboardAndSearchKeyPaths(t *testing.T) {
 	m.Cursor = 3
 	updatedModel, cmd = m.handleDashboardSelection()
 	updated = updatedModel.(Model)
+	if updated.Screen != ScreenProjects {
+		t.Fatalf("screen = %v, want %v", updated.Screen, ScreenProjects)
+	}
+	if cmd == nil {
+		t.Fatal("projects selection should load projects")
+	}
+
+	m = New(fx.store, "")
+	m.Cursor = 4
+	updatedModel, cmd = m.handleDashboardSelection()
+	updated = updatedModel.(Model)
 	if updated.Screen != ScreenSetup || len(updated.SetupAgents) == 0 {
 		t.Fatal("setup selection should initialize setup screen")
 	}
@@ -449,6 +460,8 @@ func TestHandleKeyPressRouterAndClearsError(t *testing.T) {
 		ScreenTimeline,
 		ScreenSessions,
 		ScreenSessionDetail,
+		ScreenProjects,
+		ScreenProjectDetail,
 		ScreenSetup,
 	} {
 		m.Screen = screen
@@ -476,7 +489,7 @@ func TestHandleDashboardKeysAndSelectionRemainingBranches(t *testing.T) {
 		t.Fatal("cursor should stay at bottom boundary")
 	}
 
-	m.Cursor = 4
+	m.Cursor = 5
 	_, cmd := m.handleDashboardKeys(" ")
 	if cmd == nil {
 		t.Fatal("space on quit item should return quit command")
@@ -494,10 +507,10 @@ func TestHandleDashboardKeysAndSelectionRemainingBranches(t *testing.T) {
 		t.Fatal("cursor 0 selection should open search")
 	}
 
-	m.Cursor = 4
+	m.Cursor = 5
 	_, cmd = m.handleDashboardSelection()
 	if cmd == nil {
-		t.Fatal("cursor 4 selection should quit")
+		t.Fatal("cursor 5 selection should quit")
 	}
 
 	m.Cursor = 99
