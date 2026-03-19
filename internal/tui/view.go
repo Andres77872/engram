@@ -443,14 +443,34 @@ func (m Model) viewSessions() string {
 	b.WriteString(headerStyle.Render(header))
 	b.WriteString("\n")
 
+	// Filter input or indicator
+	if m.FilterActive {
+		b.WriteString(searchInputStyle.Render(m.FilterInput.View()))
+		b.WriteString("\n")
+	} else if m.FilterQuery != "" {
+		b.WriteString(searchHighlightStyle.Render(fmt.Sprintf("  Filtered: %q (%d results)", m.FilterQuery, count)))
+		b.WriteString("\n")
+	}
+
 	if count == 0 {
-		b.WriteString(noResultsStyle.Render("No sessions yet."))
+		if m.FilterQuery != "" {
+			b.WriteString(noResultsStyle.Render("No sessions match the filter."))
+		} else {
+			b.WriteString(noResultsStyle.Render("No sessions yet."))
+		}
 		b.WriteString("\n\n")
-		b.WriteString(helpStyle.Render("  esc back"))
+		if m.FilterQuery != "" {
+			b.WriteString(helpStyle.Render("  esc clear filter"))
+		} else {
+			b.WriteString(helpStyle.Render("  esc back"))
+		}
 		return b.String()
 	}
 
 	visibleItems := m.Height - 8
+	if m.FilterActive || m.FilterQuery != "" {
+		visibleItems -= 2
+	}
 	if visibleItems < 5 {
 		visibleItems = 5
 	}
@@ -490,7 +510,11 @@ func (m Model) viewSessions() string {
 			timestampStyle.Render(fmt.Sprintf("showing %d-%d of %d", m.Scroll+1, end, count))))
 	}
 
-	b.WriteString(helpStyle.Render("\n  ↑↓ navigate • enter details • d delete • esc back • q quit"))
+	if m.FilterQuery != "" {
+		b.WriteString(helpStyle.Render("\n  ↑↓ navigate • enter details • esc clear filter • / filter"))
+	} else {
+		b.WriteString(helpStyle.Render("\n  ↑↓ navigate • enter details • d delete • / filter • esc back"))
+	}
 
 	return b.String()
 }
@@ -565,14 +589,34 @@ func (m Model) viewProjects() string {
 	b.WriteString(headerStyle.Render(header))
 	b.WriteString("\n")
 
+	// Filter input or indicator
+	if m.FilterActive {
+		b.WriteString(searchInputStyle.Render(m.FilterInput.View()))
+		b.WriteString("\n")
+	} else if m.FilterQuery != "" {
+		b.WriteString(searchHighlightStyle.Render(fmt.Sprintf("  Filtered: %q (%d results)", m.FilterQuery, count)))
+		b.WriteString("\n")
+	}
+
 	if count == 0 {
-		b.WriteString(noResultsStyle.Render("No projects yet."))
+		if m.FilterQuery != "" {
+			b.WriteString(noResultsStyle.Render("No projects match the filter."))
+		} else {
+			b.WriteString(noResultsStyle.Render("No projects yet."))
+		}
 		b.WriteString("\n\n")
-		b.WriteString(helpStyle.Render("  esc back"))
+		if m.FilterQuery != "" {
+			b.WriteString(helpStyle.Render("  esc clear filter"))
+		} else {
+			b.WriteString(helpStyle.Render("  esc back"))
+		}
 		return b.String()
 	}
 
 	visibleItems := m.Height - 8
+	if m.FilterActive || m.FilterQuery != "" {
+		visibleItems -= 2
+	}
 	if visibleItems < 5 {
 		visibleItems = 5
 	}
@@ -614,7 +658,11 @@ func (m Model) viewProjects() string {
 			timestampStyle.Render(fmt.Sprintf("showing %d-%d of %d", m.Scroll+1, end, count))))
 	}
 
-	b.WriteString(helpStyle.Render("\n  ↑↓ navigate • enter details • c clear sessions • d delete project • esc back"))
+	if m.FilterQuery != "" {
+		b.WriteString(helpStyle.Render("\n  ↑↓ navigate • enter details • esc clear filter • / filter"))
+	} else {
+		b.WriteString(helpStyle.Render("\n  ↑↓ navigate • enter details • c clear sessions • d delete project • / filter • esc back"))
+	}
 
 	return b.String()
 }
@@ -657,14 +705,34 @@ func (m Model) viewProjectDetail() string {
 	b.WriteString(sectionHeadingStyle.Render(fmt.Sprintf("  Sessions (%d)", count)))
 	b.WriteString("\n")
 
+	// Filter input or indicator
+	if m.FilterActive {
+		b.WriteString(searchInputStyle.Render(m.FilterInput.View()))
+		b.WriteString("\n")
+	} else if m.FilterQuery != "" {
+		b.WriteString(searchHighlightStyle.Render(fmt.Sprintf("  Filtered: %q (%d results)", m.FilterQuery, count)))
+		b.WriteString("\n")
+	}
+
 	if count == 0 {
-		b.WriteString(noResultsStyle.Render("No sessions in this project."))
+		if m.FilterQuery != "" {
+			b.WriteString(noResultsStyle.Render("No sessions match the filter."))
+		} else {
+			b.WriteString(noResultsStyle.Render("No sessions in this project."))
+		}
 		b.WriteString("\n\n")
-		b.WriteString(helpStyle.Render("  c clear sessions • D delete project • esc back"))
+		if m.FilterQuery != "" {
+			b.WriteString(helpStyle.Render("  esc clear filter • / filter"))
+		} else {
+			b.WriteString(helpStyle.Render("  c clear sessions • D delete project • esc back"))
+		}
 		return b.String()
 	}
 
 	visibleItems := m.Height - 10
+	if m.FilterActive || m.FilterQuery != "" {
+		visibleItems -= 2
+	}
 	if visibleItems < 5 {
 		visibleItems = 5
 	}
@@ -703,7 +771,11 @@ func (m Model) viewProjectDetail() string {
 			timestampStyle.Render(fmt.Sprintf("showing %d-%d of %d", m.ProjectDetailScroll+1, end, count))))
 	}
 
-	b.WriteString(helpStyle.Render("\n  ↑↓ navigate • enter session • c clear sessions • D delete project • esc back"))
+	if m.FilterQuery != "" {
+		b.WriteString(helpStyle.Render("\n  ↑↓ navigate • enter session • esc clear filter • / filter"))
+	} else {
+		b.WriteString(helpStyle.Render("\n  ↑↓ navigate • enter session • c clear sessions • D delete project • / filter • esc back"))
+	}
 
 	return b.String()
 }

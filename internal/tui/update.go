@@ -27,6 +27,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.Screen == ScreenSearch && m.SearchInput.Focused() {
 			return m.handleSearchInputKeys(msg)
 		}
+		// If filter input is focused, let it handle most keys
+		if m.FilterActive && m.FilterInput.Focused() {
+			return m.handleFilterInputKeys(msg)
+		}
 		return m.handleKeyPress(msg.String())
 
 	// ─── Data loaded messages ────────────────────────────────────────────
@@ -136,6 +140,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.ConfirmActive = false
 		m.Screen = ScreenSessions
 		m.Cursor = 0
+		m.resetFilter()
 		return m, tea.Batch(loadRecentSessions(m.store), clearSuccessAfterDelay())
 
 	case projectSessionsClearedMsg:
@@ -152,6 +157,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.ConfirmActive = false
 		m.Screen = ScreenDashboard
 		m.Cursor = 0
+		m.resetFilter()
 		return m, tea.Batch(loadStats(m.store), clearSuccessAfterDelay())
 
 	case projectDeletedMsg:
@@ -168,6 +174,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.ConfirmActive = false
 		m.Screen = ScreenDashboard
 		m.Cursor = 0
+		m.resetFilter()
 		return m, tea.Batch(loadStats(m.store), clearSuccessAfterDelay())
 
 	case projectsLoadedMsg:
@@ -186,6 +193,31 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.ProjectSessions = msg.sessions
 		m.Screen = ScreenProjectDetail
 		m.Cursor = 0
+		m.ProjectDetailScroll = 0
+		return m, nil
+
+	case filteredProjectsMsg:
+		if msg.err != nil {
+			m.ErrorMsg = msg.err.Error()
+			return m, nil
+		}
+		m.Projects = msg.projects
+		m.Cursor = 0
+		m.Scroll = 0
+		return m, nil
+
+	case filteredSessionsMsg:
+		if msg.err != nil {
+			m.ErrorMsg = msg.err.Error()
+			return m, nil
+		}
+		if m.Screen == ScreenSessions {
+			m.Sessions = msg.sessions
+		} else if m.Screen == ScreenProjectDetail {
+			m.ProjectSessions = msg.sessions
+		}
+		m.Cursor = 0
+		m.Scroll = 0
 		m.ProjectDetailScroll = 0
 		return m, nil
 
@@ -363,6 +395,104 @@ func (m Model) handleSearchInputKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	var cmd tea.Cmd
 	m.SearchInput, cmd = m.SearchInput.Update(msg)
 	return m, cmd
+}
+
+// ─── Filter Input ────────────────────────────────────────────────────────────
+
+func (m Model) handleFilterInputKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "enter":
+		// Confirm filter — keep filtered results, blur input
+		query := m.FilterInput.Value()
+		m.FilterInput.Blur()
+		m.FilterActive = false
+		if query != "" {
+			m.FilterQuery = query
+		} else {
+			m.FilterQuery = ""
+		}
+		return m, nil
+	case "esc":
+		// Cancel filter — clear query, reload full data
+		m.FilterInput.Blur()
+		m.FilterActive = false
+		m.FilterQuery = ""
+		m.FilterInput.SetValue("")
+		m.Cursor = 0
+		m.Scroll = 0
+		m.ProjectDetailScroll = 0
+		return m, m.reloadCurrentScreen()
+	}
+
+	// Let the text input component handle everything else (typing)
+	var cmd tea.Cmd
+	m.FilterInput, cmd = m.FilterInput.Update(msg)
+
+	// Live filter — fire a filter command on every keystroke
+	query := m.FilterInput.Value()
+	if query != "" {
+		return m, tea.Batch(cmd, m.fireFilterCmd(query))
+	}
+	// Empty input — reload full data
+	return m, tea.Batch(cmd, m.reloadCurrentScreen())
+}
+
+// fireFilterCmd returns the appropriate filter command for the current screen.
+func (m Model) fireFilterCmd(query string) tea.Cmd {
+	switch m.Screen {
+	case ScreenProjects:
+		return filterProjects(m.store, query)
+	case ScreenSessions:
+		return filterSessions(m.store, query, "", 50)
+	case ScreenProjectDetail:
+		if m.SelectedProjectIdx < len(m.Projects) {
+			project := m.Projects[m.SelectedProjectIdx].Name
+			return filterSessions(m.store, query, project, 50)
+		}
+		return nil
+	default:
+		return nil
+	}
+}
+
+// reloadCurrentScreen returns a command to reload the full (unfiltered) data for the current screen.
+func (m Model) reloadCurrentScreen() tea.Cmd {
+	switch m.Screen {
+	case ScreenProjects:
+		return loadProjects(m.store)
+	case ScreenSessions:
+		return loadRecentSessions(m.store)
+	case ScreenProjectDetail:
+		if m.SelectedProjectIdx < len(m.Projects) {
+			project := m.Projects[m.SelectedProjectIdx].Name
+			return loadProjectSessions(m.store, project, 50)
+		}
+		return nil
+	default:
+		return nil
+	}
+}
+
+// resetFilter clears all filter state (call on screen transitions).
+func (m *Model) resetFilter() {
+	m.FilterActive = false
+	m.FilterQuery = ""
+	m.FilterInput.SetValue("")
+	m.FilterInput.Blur()
+}
+
+// activateFilter activates the filter input for the current screen.
+func (m *Model) activateFilter() {
+	if m.ConfirmActive {
+		return // Don't activate filter while confirmation dialog is active
+	}
+	m.FilterActive = true
+	m.FilterQuery = ""
+	m.FilterInput.SetValue("")
+	m.FilterInput.Focus()
+	m.Cursor = 0
+	m.Scroll = 0
+	m.ProjectDetailScroll = 0
 }
 
 func (m Model) handleSearchKeys(key string) (tea.Model, tea.Cmd) {
@@ -546,10 +676,17 @@ func (m Model) handleSessionsKeys(key string) (tea.Model, tea.Cmd) {
 		if len(m.Sessions) > 0 && m.Cursor < len(m.Sessions) {
 			m.SelectedSessionIdx = m.Cursor
 			m.PrevScreen = ScreenSessions
+			m.resetFilter()
 			sessionID := m.Sessions[m.Cursor].ID
 			return m, loadSessionObservations(m.store, sessionID)
 		}
+	case "/":
+		m.activateFilter()
+		return m, nil
 	case "d":
+		if m.FilterActive || m.FilterQuery != "" {
+			return m, nil // Block destructive keys when filter is active
+		}
 		if len(m.Sessions) > 0 && m.Cursor < len(m.Sessions) {
 			sess := m.Sessions[m.Cursor]
 			sessID := sess.ID
@@ -563,10 +700,23 @@ func (m Model) handleSessionsKeys(key string) (tea.Model, tea.Cmd) {
 			m.ConfirmTarget = sess.ID
 			return m, nil
 		}
-	case "esc", "q":
+	case "esc":
+		if m.FilterQuery != "" {
+			m.resetFilter()
+			m.Cursor = 0
+			m.Scroll = 0
+			return m, loadRecentSessions(m.store)
+		}
 		m.Screen = ScreenDashboard
 		m.Cursor = 0
 		m.Scroll = 0
+		m.resetFilter()
+		return m, loadStats(m.store)
+	case "q":
+		m.Screen = ScreenDashboard
+		m.Cursor = 0
+		m.Scroll = 0
+		m.resetFilter()
 		return m, loadStats(m.store)
 	}
 	return m, nil
@@ -677,10 +827,17 @@ func (m Model) handleProjectsKeys(key string) (tea.Model, tea.Cmd) {
 		if len(m.Projects) > 0 && m.Cursor < len(m.Projects) {
 			m.SelectedProjectIdx = m.Cursor
 			m.PrevScreen = ScreenProjects
+			m.resetFilter()
 			project := m.Projects[m.Cursor].Name
 			return m, loadProjectSessions(m.store, project, 50)
 		}
+	case "/":
+		m.activateFilter()
+		return m, nil
 	case "d":
+		if m.FilterActive || m.FilterQuery != "" {
+			return m, nil // Block destructive keys when filter is active
+		}
 		if len(m.Projects) > 0 && m.Cursor < len(m.Projects) {
 			proj := m.Projects[m.Cursor]
 			m.ConfirmActive = true
@@ -691,6 +848,9 @@ func (m Model) handleProjectsKeys(key string) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 	case "c":
+		if m.FilterActive || m.FilterQuery != "" {
+			return m, nil // Block destructive keys when filter is active
+		}
 		if len(m.Projects) > 0 && m.Cursor < len(m.Projects) {
 			proj := m.Projects[m.Cursor]
 			m.ConfirmActive = true
@@ -700,10 +860,23 @@ func (m Model) handleProjectsKeys(key string) (tea.Model, tea.Cmd) {
 			m.ConfirmTarget = proj.Name
 			return m, nil
 		}
-	case "esc", "q":
+	case "esc":
+		if m.FilterQuery != "" {
+			m.resetFilter()
+			m.Cursor = 0
+			m.Scroll = 0
+			return m, loadProjects(m.store)
+		}
 		m.Screen = ScreenDashboard
 		m.Cursor = 0
 		m.Scroll = 0
+		m.resetFilter()
+		return m, loadStats(m.store)
+	case "q":
+		m.Screen = ScreenDashboard
+		m.Cursor = 0
+		m.Scroll = 0
+		m.resetFilter()
 		return m, loadStats(m.store)
 	}
 	return m, nil
@@ -737,10 +910,17 @@ func (m Model) handleProjectDetailKeys(key string) (tea.Model, tea.Cmd) {
 			m.SelectedSessionIdx = m.Cursor
 			m.Sessions = m.ProjectSessions // Make session detail work
 			m.PrevScreen = ScreenProjectDetail
+			m.resetFilter()
 			sessionID := m.ProjectSessions[m.Cursor].ID
 			return m, loadSessionObservations(m.store, sessionID)
 		}
+	case "/":
+		m.activateFilter()
+		return m, nil
 	case "c":
+		if m.FilterActive || m.FilterQuery != "" {
+			return m, nil // Block destructive keys when filter is active
+		}
 		if m.SelectedProjectIdx < len(m.Projects) {
 			proj := m.Projects[m.SelectedProjectIdx]
 			m.ConfirmActive = true
@@ -751,6 +931,9 @@ func (m Model) handleProjectDetailKeys(key string) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 	case "D":
+		if m.FilterActive || m.FilterQuery != "" {
+			return m, nil // Block destructive keys when filter is active
+		}
 		if m.SelectedProjectIdx < len(m.Projects) {
 			proj := m.Projects[m.SelectedProjectIdx]
 			m.ConfirmActive = true
@@ -760,10 +943,27 @@ func (m Model) handleProjectDetailKeys(key string) (tea.Model, tea.Cmd) {
 			m.ConfirmTarget = proj.Name
 			return m, nil
 		}
-	case "esc", "q":
+	case "esc":
+		if m.FilterQuery != "" {
+			m.resetFilter()
+			m.Cursor = 0
+			m.ProjectDetailScroll = 0
+			if m.SelectedProjectIdx < len(m.Projects) {
+				project := m.Projects[m.SelectedProjectIdx].Name
+				return m, loadProjectSessions(m.store, project, 50)
+			}
+			return m, nil
+		}
 		m.Screen = ScreenProjects
 		m.Cursor = m.SelectedProjectIdx
 		m.ProjectDetailScroll = 0
+		m.resetFilter()
+		return m, loadProjects(m.store)
+	case "q":
+		m.Screen = ScreenProjects
+		m.Cursor = m.SelectedProjectIdx
+		m.ProjectDetailScroll = 0
+		m.resetFilter()
 		return m, loadProjects(m.store)
 	}
 	return m, nil
