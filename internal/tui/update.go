@@ -1,6 +1,8 @@
 package tui
 
 import (
+	"fmt"
+
 	"github.com/Gentleman-Programming/engram/internal/setup"
 	"github.com/charmbracelet/bubbles/spinner"
 	tea "github.com/charmbracelet/bubbletea"
@@ -118,12 +120,78 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case spinner.TickMsg:
-		// Only forward spinner ticks when we're actually installing
 		if m.SetupInstalling {
 			var cmd tea.Cmd
 			m.SetupSpinner, cmd = m.SetupSpinner.Update(msg)
 			return m, cmd
 		}
+		return m, nil
+
+	case sessionDeletedMsg:
+		if msg.err != nil {
+			m.ErrorMsg = msg.err.Error()
+			return m, nil
+		}
+		m.ErrorMsg = ""
+		m.SuccessMsg = "✓ Session deleted"
+		m.ConfirmActive = false
+		m.Screen = ScreenSessions
+		m.Cursor = 0
+		return m, tea.Batch(loadRecentSessions(m.store), clearSuccessAfterDelay())
+
+	case projectSessionsClearedMsg:
+		if msg.err != nil {
+			m.ErrorMsg = msg.err.Error()
+			return m, nil
+		}
+		m.ErrorMsg = ""
+		if msg.result != nil {
+			m.SuccessMsg = fmt.Sprintf("✓ %d sessions, %d observations cleared", msg.result.SessionsDeleted, msg.result.ObservationsDeleted)
+		} else {
+			m.SuccessMsg = "✓ Project sessions cleared"
+		}
+		m.ConfirmActive = false
+		m.Screen = ScreenDashboard
+		m.Cursor = 0
+		return m, tea.Batch(loadStats(m.store), clearSuccessAfterDelay())
+
+	case projectDeletedMsg:
+		if msg.err != nil {
+			m.ErrorMsg = msg.err.Error()
+			return m, nil
+		}
+		m.ErrorMsg = ""
+		if msg.result != nil {
+			m.SuccessMsg = fmt.Sprintf("✓ Project deleted: %d sessions, %d observations removed", msg.result.SessionsDeleted, msg.result.ObservationsDeleted)
+		} else {
+			m.SuccessMsg = "✓ Project deleted"
+		}
+		m.ConfirmActive = false
+		m.Screen = ScreenDashboard
+		m.Cursor = 0
+		return m, tea.Batch(loadStats(m.store), clearSuccessAfterDelay())
+
+	case projectsLoadedMsg:
+		if msg.err != nil {
+			m.ErrorMsg = msg.err.Error()
+			return m, nil
+		}
+		m.Projects = msg.projects
+		return m, nil
+
+	case projectDetailSessionsMsg:
+		if msg.err != nil {
+			m.ErrorMsg = msg.err.Error()
+			return m, nil
+		}
+		m.ProjectSessions = msg.sessions
+		m.Screen = ScreenProjectDetail
+		m.Cursor = 0
+		m.ProjectDetailScroll = 0
+		return m, nil
+
+	case successClearMsg:
+		m.SuccessMsg = ""
 		return m, nil
 	}
 
@@ -133,8 +201,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 // ─── Key Press Router ────────────────────────────────────────────────────────
 
 func (m Model) handleKeyPress(key string) (tea.Model, tea.Cmd) {
-	// Clear error on any keypress
 	m.ErrorMsg = ""
+
+	if m.ConfirmActive {
+		return m.handleConfirmKeys(key)
+	}
 
 	switch m.Screen {
 	case ScreenDashboard:
@@ -153,9 +224,41 @@ func (m Model) handleKeyPress(key string) (tea.Model, tea.Cmd) {
 		return m.handleSessionsKeys(key)
 	case ScreenSessionDetail:
 		return m.handleSessionDetailKeys(key)
+	case ScreenProjects:
+		return m.handleProjectsKeys(key)
+	case ScreenProjectDetail:
+		return m.handleProjectDetailKeys(key)
 	case ScreenSetup:
 		return m.handleSetupKeys(key)
 	}
+	return m, nil
+}
+
+func (m Model) handleConfirmKeys(key string) (tea.Model, tea.Cmd) {
+	switch key {
+	case "y", "Y":
+		return m.executeConfirmAction()
+	case "n", "N", "esc":
+		m.ConfirmActive = false
+		m.ConfirmAction = ConfirmNone
+		m.ConfirmMsg = ""
+		m.ConfirmDetail = ""
+		m.ConfirmTarget = ""
+		return m, nil
+	}
+	return m, nil
+}
+
+func (m Model) executeConfirmAction() (tea.Model, tea.Cmd) {
+	switch m.ConfirmAction {
+	case ConfirmDeleteSession:
+		return m, deleteSessionCmd(m.store, m.ConfirmTarget)
+	case ConfirmClearProjectSessions:
+		return m, clearProjectSessionsCmd(m.store, m.ConfirmTarget)
+	case ConfirmDeleteProject:
+		return m, deleteProjectCmd(m.store, m.ConfirmTarget)
+	}
+	m.ConfirmActive = false
 	return m, nil
 }
 
@@ -165,6 +268,7 @@ var dashboardMenuItems = []string{
 	"Search memories",
 	"Recent observations",
 	"Browse sessions",
+	"Browse projects",
 	"Setup agent plugin",
 	"Quit",
 }
@@ -215,7 +319,13 @@ func (m Model) handleDashboardSelection() (tea.Model, tea.Cmd) {
 		m.Cursor = 0
 		m.Scroll = 0
 		return m, loadRecentSessions(m.store)
-	case 3: // Setup
+	case 3: // Projects
+		m.PrevScreen = ScreenDashboard
+		m.Screen = ScreenProjects
+		m.Cursor = 0
+		m.Scroll = 0
+		return m, loadProjects(m.store)
+	case 4: // Setup
 		m.PrevScreen = ScreenDashboard
 		m.Screen = ScreenSetup
 		m.Cursor = 0
@@ -226,7 +336,7 @@ func (m Model) handleDashboardSelection() (tea.Model, tea.Cmd) {
 		m.SetupInstalling = false
 		m.SetupInstallingName = ""
 		return m, nil
-	case 4: // Quit
+	case 5: // Quit
 		return m, tea.Quit
 	}
 	return m, nil
@@ -440,6 +550,20 @@ func (m Model) handleSessionsKeys(key string) (tea.Model, tea.Cmd) {
 			sessionID := m.Sessions[m.Cursor].ID
 			return m, loadSessionObservations(m.store, sessionID)
 		}
+	case "d":
+		if len(m.Sessions) > 0 && m.Cursor < len(m.Sessions) {
+			sess := m.Sessions[m.Cursor]
+			sessID := sess.ID
+			if len(sessID) > 8 {
+				sessID = sessID[:8]
+			}
+			m.ConfirmActive = true
+			m.ConfirmAction = ConfirmDeleteSession
+			m.ConfirmMsg = "Delete this session?"
+			m.ConfirmDetail = fmt.Sprintf("Session: %s (%d observations)", sessID, sess.ObservationCount)
+			m.ConfirmTarget = sess.ID
+			return m, nil
+		}
 	case "esc", "q":
 		m.Screen = ScreenDashboard
 		m.Cursor = 0
@@ -452,7 +576,7 @@ func (m Model) handleSessionsKeys(key string) (tea.Model, tea.Cmd) {
 // ─── Session Detail ──────────────────────────────────────────────────────────
 
 func (m Model) handleSessionDetailKeys(key string) (tea.Model, tea.Cmd) {
-	visibleItems := (m.Height - 12) / 2 // 2 lines per observation item
+	visibleItems := (m.Height - 12) / 2
 	if visibleItems < 3 {
 		visibleItems = 3
 	}
@@ -484,11 +608,164 @@ func (m Model) handleSessionDetailKeys(key string) (tea.Model, tea.Cmd) {
 			m.PrevScreen = ScreenSessionDetail
 			return m, loadTimeline(m.store, obsID)
 		}
+	case "d":
+		if m.SelectedSessionIdx < len(m.Sessions) {
+			sess := m.Sessions[m.SelectedSessionIdx]
+			sessID := sess.ID
+			if len(sessID) > 8 {
+				sessID = sessID[:8]
+			}
+			m.ConfirmActive = true
+			m.ConfirmAction = ConfirmDeleteSession
+			m.ConfirmMsg = "Delete this session?"
+			m.ConfirmDetail = fmt.Sprintf("Session: %s (%d observations)", sessID, sess.ObservationCount)
+			m.ConfirmTarget = sess.ID
+			return m, nil
+		}
+	case "c":
+		if m.SelectedSessionIdx < len(m.Sessions) {
+			sess := m.Sessions[m.SelectedSessionIdx]
+			m.ConfirmActive = true
+			m.ConfirmAction = ConfirmClearProjectSessions
+			m.ConfirmMsg = "Clear ALL sessions for this project?"
+			m.ConfirmDetail = fmt.Sprintf("Project: %s", sess.Project)
+			m.ConfirmTarget = sess.Project
+			return m, nil
+		}
+	case "D":
+		if m.SelectedSessionIdx < len(m.Sessions) {
+			sess := m.Sessions[m.SelectedSessionIdx]
+			m.ConfirmActive = true
+			m.ConfirmAction = ConfirmDeleteProject
+			m.ConfirmMsg = "DELETE ENTIRE PROJECT?"
+			m.ConfirmDetail = fmt.Sprintf("Project: %s — This cannot be undone!", sess.Project)
+			m.ConfirmTarget = sess.Project
+			return m, nil
+		}
 	case "esc", "q":
 		m.Screen = ScreenSessions
 		m.Cursor = m.SelectedSessionIdx
 		m.SessionDetailScroll = 0
 		return m, loadRecentSessions(m.store)
+	}
+	return m, nil
+}
+
+// ─── Projects ────────────────────────────────────────────────────────────────
+
+func (m Model) handleProjectsKeys(key string) (tea.Model, tea.Cmd) {
+	visibleItems := m.Height - 8
+	if visibleItems < 5 {
+		visibleItems = 5
+	}
+
+	switch key {
+	case "up", "k":
+		if m.Cursor > 0 {
+			m.Cursor--
+			if m.Cursor < m.Scroll {
+				m.Scroll = m.Cursor
+			}
+		}
+	case "down", "j":
+		if m.Cursor < len(m.Projects)-1 {
+			m.Cursor++
+			if m.Cursor >= m.Scroll+visibleItems {
+				m.Scroll = m.Cursor - visibleItems + 1
+			}
+		}
+	case "enter":
+		if len(m.Projects) > 0 && m.Cursor < len(m.Projects) {
+			m.SelectedProjectIdx = m.Cursor
+			m.PrevScreen = ScreenProjects
+			project := m.Projects[m.Cursor].Name
+			return m, loadProjectSessions(m.store, project, 50)
+		}
+	case "d":
+		if len(m.Projects) > 0 && m.Cursor < len(m.Projects) {
+			proj := m.Projects[m.Cursor]
+			m.ConfirmActive = true
+			m.ConfirmAction = ConfirmDeleteProject
+			m.ConfirmMsg = "DELETE ENTIRE PROJECT?"
+			m.ConfirmDetail = fmt.Sprintf("Project: %s (%d sessions, %d observations) — This cannot be undone!", proj.Name, proj.SessionCount, proj.ObservationCount)
+			m.ConfirmTarget = proj.Name
+			return m, nil
+		}
+	case "c":
+		if len(m.Projects) > 0 && m.Cursor < len(m.Projects) {
+			proj := m.Projects[m.Cursor]
+			m.ConfirmActive = true
+			m.ConfirmAction = ConfirmClearProjectSessions
+			m.ConfirmMsg = "Clear ALL sessions for this project?"
+			m.ConfirmDetail = fmt.Sprintf("Project: %s (%d sessions)", proj.Name, proj.SessionCount)
+			m.ConfirmTarget = proj.Name
+			return m, nil
+		}
+	case "esc", "q":
+		m.Screen = ScreenDashboard
+		m.Cursor = 0
+		m.Scroll = 0
+		return m, loadStats(m.store)
+	}
+	return m, nil
+}
+
+// ─── Project Detail ──────────────────────────────────────────────────────────
+
+func (m Model) handleProjectDetailKeys(key string) (tea.Model, tea.Cmd) {
+	visibleItems := m.Height - 10
+	if visibleItems < 5 {
+		visibleItems = 5
+	}
+
+	switch key {
+	case "up", "k":
+		if m.Cursor > 0 {
+			m.Cursor--
+			if m.Cursor < m.ProjectDetailScroll {
+				m.ProjectDetailScroll = m.Cursor
+			}
+		}
+	case "down", "j":
+		if m.Cursor < len(m.ProjectSessions)-1 {
+			m.Cursor++
+			if m.Cursor >= m.ProjectDetailScroll+visibleItems {
+				m.ProjectDetailScroll = m.Cursor - visibleItems + 1
+			}
+		}
+	case "enter":
+		if len(m.ProjectSessions) > 0 && m.Cursor < len(m.ProjectSessions) {
+			m.SelectedSessionIdx = m.Cursor
+			m.Sessions = m.ProjectSessions // Make session detail work
+			m.PrevScreen = ScreenProjectDetail
+			sessionID := m.ProjectSessions[m.Cursor].ID
+			return m, loadSessionObservations(m.store, sessionID)
+		}
+	case "c":
+		if m.SelectedProjectIdx < len(m.Projects) {
+			proj := m.Projects[m.SelectedProjectIdx]
+			m.ConfirmActive = true
+			m.ConfirmAction = ConfirmClearProjectSessions
+			m.ConfirmMsg = "Clear ALL sessions for this project?"
+			m.ConfirmDetail = fmt.Sprintf("Project: %s (%d sessions)", proj.Name, proj.SessionCount)
+			m.ConfirmTarget = proj.Name
+			return m, nil
+		}
+	case "D":
+		if m.SelectedProjectIdx < len(m.Projects) {
+			proj := m.Projects[m.SelectedProjectIdx]
+			m.ConfirmActive = true
+			m.ConfirmAction = ConfirmDeleteProject
+			m.ConfirmMsg = "DELETE ENTIRE PROJECT?"
+			m.ConfirmDetail = fmt.Sprintf("Project: %s — This cannot be undone!", proj.Name)
+			m.ConfirmTarget = proj.Name
+			return m, nil
+		}
+	case "esc", "q":
+		m.Screen = ScreenProjects
+		m.Cursor = m.SelectedProjectIdx
+		m.ProjectDetailScroll = 0
+		return m, loadProjects(m.store)
 	}
 	return m, nil
 }
@@ -573,6 +850,8 @@ func (m Model) refreshScreen(screen Screen) tea.Cmd {
 		return loadRecentObservations(m.store)
 	case ScreenSessions:
 		return loadRecentSessions(m.store)
+	case ScreenProjects:
+		return loadProjects(m.store)
 	default:
 		return nil
 	}

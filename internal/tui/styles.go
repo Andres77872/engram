@@ -199,4 +199,20 @@ var (
 			Italic(true).
 			PaddingLeft(2).
 			MarginTop(1)
+
+	confirmBoxStyle = lipgloss.NewStyle().
+			BorderStyle(lipgloss.NormalBorder()).
+			BorderForeground(colorRed).
+			Padding(1, 2).
+			MarginTop(1).
+			MarginBottom(1)
+
+	confirmWarningStyle = lipgloss.NewStyle().
+				Foreground(colorRed).
+				Bold(true)
+
+	successStyle = lipgloss.NewStyle().
+			Foreground(colorGreen).
+			Bold(true).
+			Padding(0, 1)
 )

@@ -321,6 +321,9 @@ func TestViewRouterCoversAllScreens(t *testing.T) {
 	m.Sessions = []store.SessionSummary{{ID: "s1", Project: "engram", StartedAt: "now", ObservationCount: 1}}
 	m.SelectedSessionIdx = 0
 	m.SessionObservations = []store.Observation{{ID: 1, Type: "bugfix", Title: "t", Content: "c", CreatedAt: "now"}}
+	m.Projects = []store.ProjectStats{{Name: "engram", SessionCount: 3, ObservationCount: 10, PromptCount: 5, LastActivityAt: "2026-01-01"}}
+	m.SelectedProjectIdx = 0
+	m.ProjectSessions = []store.SessionSummary{{ID: "s1", Project: "engram", StartedAt: "now", ObservationCount: 1}}
 	m.SetupAgents = []setup.Agent{{Name: "opencode", Description: "OpenCode", InstallDir: "/tmp"}}
 	m.Height = 20
 
@@ -336,6 +339,8 @@ func TestViewRouterCoversAllScreens(t *testing.T) {
 		{screen: ScreenTimeline, want: "Timeline"},
 		{screen: ScreenSessions, want: "Sessions"},
 		{screen: ScreenSessionDetail, want: "Session:"},
+		{screen: ScreenProjects, want: "Projects"},
+		{screen: ScreenProjectDetail, want: "Project:"},
 		{screen: ScreenSetup, want: "Setup"},
 	}
 
@@ -435,4 +440,60 @@ func TestViewSetupAllowlistPrompt(t *testing.T) {
 			t.Fatal("should show error message")
 		}
 	})
+}
+
+func TestViewProjectsAndProjectDetail(t *testing.T) {
+	m := New(nil, "")
+	m.Height = 20
+
+	// Empty state
+	m.Projects = nil
+	out := m.viewProjects()
+	if !strings.Contains(out, "No projects yet") {
+		t.Fatal("projects view should render empty state")
+	}
+
+	// With projects
+	m.Projects = []store.ProjectStats{
+		{Name: "engram", SessionCount: 3, ObservationCount: 10, PromptCount: 5, LastActivityAt: "2026-01-01"},
+		{Name: "opencode", SessionCount: 1, ObservationCount: 3, PromptCount: 1, LastActivityAt: "2026-01-02"},
+	}
+	m.Cursor = 0
+	out = m.viewProjects()
+	if !strings.Contains(out, "Projects") || !strings.Contains(out, "2 total") {
+		t.Fatal("projects view should show header with count")
+	}
+	if !strings.Contains(out, "engram") || !strings.Contains(out, "opencode") {
+		t.Fatal("projects view should list project names")
+	}
+
+	// Project detail - invalid index
+	m.SelectedProjectIdx = 99
+	out = m.viewProjectDetail()
+	if !strings.Contains(out, "Project not found") {
+		t.Fatal("project detail should guard invalid index")
+	}
+
+	// Project detail - valid project, no sessions
+	m.SelectedProjectIdx = 0
+	m.ProjectSessions = nil
+	out = m.viewProjectDetail()
+	if !strings.Contains(out, "Project: engram") {
+		t.Fatal("project detail should show project name")
+	}
+	if !strings.Contains(out, "No sessions in this project") {
+		t.Fatal("project detail should render empty sessions state")
+	}
+
+	// Project detail - with sessions
+	summary := "test summary"
+	m.ProjectSessions = []store.SessionSummary{
+		{ID: "s1", Project: "engram", StartedAt: "2026-01-01", Summary: &summary, ObservationCount: 5},
+		{ID: "s2", Project: "engram", StartedAt: "2026-01-02", ObservationCount: 2},
+	}
+	m.Cursor = 0
+	out = m.viewProjectDetail()
+	if !strings.Contains(out, "Sessions (2)") {
+		t.Fatal("project detail should show sessions heading with count")
+	}
 }

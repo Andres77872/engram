@@ -101,6 +101,8 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /sessions", s.handleCreateSession)
 	s.mux.HandleFunc("POST /sessions/{id}/end", s.handleEndSession)
 	s.mux.HandleFunc("GET /sessions/recent", s.handleRecentSessions)
+	s.mux.HandleFunc("DELETE /sessions/{id}", s.handleDeleteSession)
+	s.mux.HandleFunc("DELETE /sessions/project/{project}", s.handleClearProjectSessions)
 
 	// Observations
 	s.mux.HandleFunc("POST /observations", s.handleAddObservation)
@@ -133,6 +135,7 @@ func (s *Server) routes() {
 
 	// Project migration
 	s.mux.HandleFunc("POST /projects/migrate", s.handleMigrateProject)
+	s.mux.HandleFunc("DELETE /projects/{project}", s.handleDeleteProject)
 
 	// Sync status (degraded-state visibility for autosync)
 	s.mux.HandleFunc("GET /sync/status", s.handleSyncStatus)
@@ -200,6 +203,39 @@ func (s *Server) handleRecentSessions(w http.ResponseWriter, r *http.Request) {
 	}
 
 	jsonResponse(w, http.StatusOK, sessions)
+}
+
+func (s *Server) handleDeleteSession(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if id == "" {
+		jsonError(w, http.StatusBadRequest, "session id is required")
+		return
+	}
+
+	if err := s.store.DeleteSession(id); err != nil {
+		jsonError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	s.notifyWrite()
+	jsonResponse(w, http.StatusOK, map[string]string{"status": "deleted", "session_id": id})
+}
+
+func (s *Server) handleClearProjectSessions(w http.ResponseWriter, r *http.Request) {
+	project := r.PathValue("project")
+	if project == "" {
+		jsonError(w, http.StatusBadRequest, "project is required")
+		return
+	}
+
+	result, err := s.store.ClearProjectSessions(project)
+	if err != nil {
+		jsonError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	s.notifyWrite()
+	jsonResponse(w, http.StatusOK, result)
 }
 
 func (s *Server) handleAddObservation(w http.ResponseWriter, r *http.Request) {
@@ -560,6 +596,23 @@ func (s *Server) handleMigrateProject(w http.ResponseWriter, r *http.Request) {
 		"sessions":     result.SessionsUpdated,
 		"prompts":      result.PromptsUpdated,
 	})
+}
+
+func (s *Server) handleDeleteProject(w http.ResponseWriter, r *http.Request) {
+	project := r.PathValue("project")
+	if project == "" {
+		jsonError(w, http.StatusBadRequest, "project is required")
+		return
+	}
+
+	result, err := s.store.DeleteProject(project)
+	if err != nil {
+		jsonError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	s.notifyWrite()
+	jsonResponse(w, http.StatusOK, result)
 }
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────

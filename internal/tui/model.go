@@ -10,6 +10,8 @@
 package tui
 
 import (
+	"time"
+
 	"github.com/Gentleman-Programming/engram/internal/setup"
 	"github.com/Gentleman-Programming/engram/internal/store"
 	"github.com/Gentleman-Programming/engram/internal/version"
@@ -33,7 +35,20 @@ const (
 	ScreenTimeline
 	ScreenSessions
 	ScreenSessionDetail
+	ScreenProjects
+	ScreenProjectDetail
 	ScreenSetup
+)
+
+// ─── Confirmation Dialog Actions ─────────────────────────────────────────────
+
+type ConfirmAction int
+
+const (
+	ConfirmNone ConfirmAction = iota
+	ConfirmDeleteSession
+	ConfirmClearProjectSessions
+	ConfirmDeleteProject
 )
 
 // ─── Custom Messages ─────────────────────────────────────────────────────────
@@ -83,6 +98,32 @@ type setupInstallMsg struct {
 	err    error
 }
 
+type sessionDeletedMsg struct {
+	err error
+}
+
+type projectSessionsClearedMsg struct {
+	result *store.DeleteResult
+	err    error
+}
+
+type projectDeletedMsg struct {
+	result *store.DeleteResult
+	err    error
+}
+
+type successClearMsg struct{}
+
+type projectsLoadedMsg struct {
+	projects []store.ProjectStats
+	err      error
+}
+
+type projectDetailSessionsMsg struct {
+	sessions []store.SessionSummary
+	err      error
+}
+
 // ─── Model ───────────────────────────────────────────────────────────────────
 
 type Model struct {
@@ -99,8 +140,15 @@ type Model struct {
 	UpdateStatus version.CheckStatus
 	UpdateMsg    string
 
-	// Error display
-	ErrorMsg string
+	// Status messages
+	ErrorMsg   string
+	SuccessMsg string
+
+	ConfirmActive bool
+	ConfirmAction ConfirmAction
+	ConfirmMsg    string
+	ConfirmDetail string
+	ConfirmTarget string
 
 	// Dashboard
 	Stats *store.Stats
@@ -125,6 +173,12 @@ type Model struct {
 	SelectedSessionIdx  int
 	SessionObservations []store.Observation
 	SessionDetailScroll int
+
+	// Projects
+	Projects            []store.ProjectStats
+	SelectedProjectIdx  int
+	ProjectSessions     []store.SessionSummary
+	ProjectDetailScroll int
 
 	// Setup
 	SetupAgents           []setup.Agent
@@ -229,6 +283,47 @@ func installAgent(agentName string) tea.Cmd {
 	return func() tea.Msg {
 		result, err := installAgentFn(agentName)
 		return setupInstallMsg{result: result, err: err}
+	}
+}
+
+func deleteSessionCmd(s *store.Store, id string) tea.Cmd {
+	return func() tea.Msg {
+		err := s.DeleteSession(id)
+		return sessionDeletedMsg{err: err}
+	}
+}
+
+func clearProjectSessionsCmd(s *store.Store, project string) tea.Cmd {
+	return func() tea.Msg {
+		result, err := s.ClearProjectSessions(project)
+		return projectSessionsClearedMsg{result: result, err: err}
+	}
+}
+
+func deleteProjectCmd(s *store.Store, project string) tea.Cmd {
+	return func() tea.Msg {
+		result, err := s.DeleteProject(project)
+		return projectDeletedMsg{result: result, err: err}
+	}
+}
+
+func clearSuccessAfterDelay() tea.Cmd {
+	return tea.Tick(3*time.Second, func(time.Time) tea.Msg {
+		return successClearMsg{}
+	})
+}
+
+func loadProjects(s *store.Store) tea.Cmd {
+	return func() tea.Msg {
+		projects, err := s.ListProjectStats()
+		return projectsLoadedMsg{projects: projects, err: err}
+	}
+}
+
+func loadProjectSessions(s *store.Store, project string, limit int) tea.Cmd {
+	return func() tea.Msg {
+		sessions, err := s.ProjectSessions(project, limit)
+		return projectDetailSessionsMsg{sessions: sessions, err: err}
 	}
 }
 
