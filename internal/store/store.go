@@ -1866,6 +1866,90 @@ func (s *Store) ProjectSessions(project string, limit int) ([]SessionSummary, er
 	return s.AllSessions(project, limit)
 }
 
+// FilterProjects returns projects whose name matches the query (case-insensitive LIKE).
+func (s *Store) FilterProjects(query string) ([]ProjectStats, error) {
+	q := `
+		SELECT 
+			p.name,
+			COALESCE((SELECT COUNT(*) FROM sessions WHERE project = p.name), 0) as session_count,
+			COALESCE((SELECT COUNT(*) FROM observations WHERE project = p.name AND deleted_at IS NULL), 0) as observation_count,
+			COALESCE((SELECT COUNT(*) FROM user_prompts WHERE project = p.name), 0) as prompt_count,
+			COALESCE(
+				(SELECT MAX(m) FROM (
+					SELECT MAX(started_at) as m FROM sessions WHERE project = p.name
+					UNION ALL
+					SELECT MAX(created_at) as m FROM observations WHERE project = p.name AND deleted_at IS NULL
+				)), ''
+			) as last_activity_at
+		FROM (
+			SELECT DISTINCT project as name FROM observations WHERE project IS NOT NULL AND project != '' AND deleted_at IS NULL
+			UNION
+			SELECT DISTINCT project as name FROM sessions WHERE project IS NOT NULL AND project != ''
+		) p
+		WHERE LOWER(p.name) LIKE '%' || LOWER(?) || '%'
+		ORDER BY last_activity_at DESC
+	`
+
+	rows, err := s.queryItHook(s.db, q, query)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var results []ProjectStats
+	for rows.Next() {
+		var ps ProjectStats
+		if err := rows.Scan(&ps.Name, &ps.SessionCount, &ps.ObservationCount, &ps.PromptCount, &ps.LastActivityAt); err != nil {
+			return nil, err
+		}
+		results = append(results, ps)
+	}
+	return results, rows.Err()
+}
+
+// FilterSessions returns sessions matching the query against session ID, project, or summary (case-insensitive LIKE).
+// If project is non-empty, results are also scoped to that exact project.
+func (s *Store) FilterSessions(query string, project string, limit int) ([]SessionSummary, error) {
+	if limit <= 0 {
+		limit = 50
+	}
+
+	q := `
+		SELECT s.id, s.project, s.started_at, s.ended_at, s.summary,
+		       COUNT(o.id) as observation_count
+		FROM sessions s
+		LEFT JOIN observations o ON o.session_id = s.id AND o.deleted_at IS NULL
+		WHERE (LOWER(s.id) LIKE '%' || LOWER(?) || '%'
+		    OR LOWER(s.project) LIKE '%' || LOWER(?) || '%'
+		    OR LOWER(COALESCE(s.summary, '')) LIKE '%' || LOWER(?) || '%')
+	`
+	args := []any{query, query, query}
+
+	if project != "" {
+		q += " AND s.project = ?"
+		args = append(args, project)
+	}
+
+	q += " GROUP BY s.id ORDER BY MAX(COALESCE(o.created_at, s.started_at)) DESC LIMIT ?"
+	args = append(args, limit)
+
+	rows, err := s.queryItHook(s.db, q, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var results []SessionSummary
+	for rows.Next() {
+		var ss SessionSummary
+		if err := rows.Scan(&ss.ID, &ss.Project, &ss.StartedAt, &ss.EndedAt, &ss.Summary, &ss.ObservationCount); err != nil {
+			return nil, err
+		}
+		results = append(results, ss)
+	}
+	return results, rows.Err()
+}
+
 // ─── Context Formatting ─────────────────────────────────────────────────────
 
 func (s *Store) FormatContext(project, scope string) (string, error) {

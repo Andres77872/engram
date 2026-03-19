@@ -482,3 +482,318 @@ func TestViewProjectsAndProjectDetail(t *testing.T) {
 		t.Fatal("project detail should show sessions heading with count")
 	}
 }
+
+// ─── Filter View Tests ───────────────────────────────────────────────────────
+
+func TestViewSessionsFilterUI(t *testing.T) {
+	summary := "session summary"
+
+	t.Run("filter input visible when active", func(t *testing.T) {
+		m := New(nil, "")
+		m.Height = 20
+		m.FilterActive = true
+		m.FilterInput.Focus()
+		// Don't set value — placeholder "Filter..." shows when empty
+		m.Sessions = []store.SessionSummary{
+			{ID: "s1", Project: "engram", StartedAt: "2026-01-01", Summary: &summary, ObservationCount: 2},
+		}
+
+		out := m.viewSessions()
+		if !strings.Contains(out, "Filter") {
+			t.Fatal("sessions view should render filter input when FilterActive is true")
+		}
+	})
+
+	t.Run("filtered indicator when blurred with query", func(t *testing.T) {
+		m := New(nil, "")
+		m.Height = 20
+		m.FilterActive = false
+		m.FilterQuery = "eng"
+		m.Sessions = []store.SessionSummary{
+			{ID: "s1", Project: "engram", StartedAt: "2026-01-01", Summary: &summary, ObservationCount: 2},
+		}
+
+		out := m.viewSessions()
+		if !strings.Contains(out, "Filtered:") || !strings.Contains(out, "eng") {
+			t.Fatal("sessions view should show 'Filtered:' indicator when FilterQuery is set")
+		}
+		if !strings.Contains(out, "1 results") {
+			t.Fatal("sessions view should show result count in filtered indicator")
+		}
+	})
+
+	t.Run("filtered empty state", func(t *testing.T) {
+		m := New(nil, "")
+		m.Height = 20
+		m.FilterQuery = "nonexistent"
+		m.Sessions = nil
+
+		out := m.viewSessions()
+		if !strings.Contains(out, "No sessions match the filter") {
+			t.Fatal("sessions view should show filter-specific empty state")
+		}
+		if !strings.Contains(out, "clear filter") {
+			t.Fatal("sessions view help bar should suggest clearing filter when filtered with no results")
+		}
+	})
+
+	t.Run("unfiltered empty state", func(t *testing.T) {
+		m := New(nil, "")
+		m.Height = 20
+		m.FilterQuery = ""
+		m.Sessions = nil
+
+		out := m.viewSessions()
+		if !strings.Contains(out, "No sessions yet") {
+			t.Fatal("sessions view should show normal empty state when not filtered")
+		}
+	})
+
+	t.Run("filtered help bar", func(t *testing.T) {
+		m := New(nil, "")
+		m.Height = 20
+		m.FilterQuery = "eng"
+		m.Sessions = []store.SessionSummary{
+			{ID: "s1", Project: "engram", StartedAt: "2026-01-01", ObservationCount: 1},
+		}
+
+		out := m.viewSessions()
+		if !strings.Contains(out, "esc clear filter") {
+			t.Fatal("sessions help bar should show 'esc clear filter' when filtered")
+		}
+	})
+
+	t.Run("unfiltered help bar includes filter shortcut", func(t *testing.T) {
+		m := New(nil, "")
+		m.Height = 20
+		m.FilterQuery = ""
+		m.Sessions = []store.SessionSummary{
+			{ID: "s1", Project: "engram", StartedAt: "2026-01-01", ObservationCount: 1},
+		}
+
+		out := m.viewSessions()
+		if !strings.Contains(out, "/ filter") {
+			t.Fatal("sessions help bar should show '/ filter' when not filtered")
+		}
+		if !strings.Contains(out, "d delete") {
+			t.Fatal("sessions help bar should show 'd delete' when not filtered")
+		}
+	})
+}
+
+func TestViewProjectsFilterUI(t *testing.T) {
+	t.Run("filter input visible when active", func(t *testing.T) {
+		m := New(nil, "")
+		m.Height = 20
+		m.FilterActive = true
+		m.FilterInput.Focus()
+		// Don't set value — placeholder "Filter..." shows when empty
+		m.Projects = []store.ProjectStats{
+			{Name: "engram", SessionCount: 3, ObservationCount: 10, PromptCount: 5, LastActivityAt: "2026-01-01"},
+		}
+
+		out := m.viewProjects()
+		if !strings.Contains(out, "Filter") {
+			t.Fatal("projects view should render filter input when FilterActive is true")
+		}
+	})
+
+	t.Run("filtered indicator when blurred with query", func(t *testing.T) {
+		m := New(nil, "")
+		m.Height = 20
+		m.FilterActive = false
+		m.FilterQuery = "eng"
+		m.Projects = []store.ProjectStats{
+			{Name: "engram", SessionCount: 3, ObservationCount: 10, PromptCount: 5, LastActivityAt: "2026-01-01"},
+		}
+
+		out := m.viewProjects()
+		if !strings.Contains(out, "Filtered:") || !strings.Contains(out, "eng") {
+			t.Fatal("projects view should show 'Filtered:' indicator when FilterQuery is set")
+		}
+		if !strings.Contains(out, "1 results") {
+			t.Fatal("projects view should show result count in filtered indicator")
+		}
+	})
+
+	t.Run("filtered empty state", func(t *testing.T) {
+		m := New(nil, "")
+		m.Height = 20
+		m.FilterQuery = "nonexistent"
+		m.Projects = nil
+
+		out := m.viewProjects()
+		if !strings.Contains(out, "No projects match the filter") {
+			t.Fatal("projects view should show filter-specific empty state")
+		}
+		if !strings.Contains(out, "clear filter") {
+			t.Fatal("projects view help bar should suggest clearing filter when filtered with no results")
+		}
+	})
+
+	t.Run("unfiltered empty state", func(t *testing.T) {
+		m := New(nil, "")
+		m.Height = 20
+		m.FilterQuery = ""
+		m.Projects = nil
+
+		out := m.viewProjects()
+		if !strings.Contains(out, "No projects yet") {
+			t.Fatal("projects view should show normal empty state when not filtered")
+		}
+	})
+
+	t.Run("filtered help bar", func(t *testing.T) {
+		m := New(nil, "")
+		m.Height = 20
+		m.FilterQuery = "eng"
+		m.Projects = []store.ProjectStats{
+			{Name: "engram", SessionCount: 1, ObservationCount: 1, PromptCount: 1, LastActivityAt: "2026-01-01"},
+		}
+
+		out := m.viewProjects()
+		if !strings.Contains(out, "esc clear filter") {
+			t.Fatal("projects help bar should show 'esc clear filter' when filtered")
+		}
+	})
+
+	t.Run("unfiltered help bar includes filter shortcut", func(t *testing.T) {
+		m := New(nil, "")
+		m.Height = 20
+		m.FilterQuery = ""
+		m.Projects = []store.ProjectStats{
+			{Name: "engram", SessionCount: 1, ObservationCount: 1, PromptCount: 1, LastActivityAt: "2026-01-01"},
+		}
+
+		out := m.viewProjects()
+		if !strings.Contains(out, "/ filter") {
+			t.Fatal("projects help bar should show '/ filter' when not filtered")
+		}
+		if !strings.Contains(out, "d delete project") {
+			t.Fatal("projects help bar should show 'd delete project' when not filtered")
+		}
+	})
+}
+
+func TestViewProjectDetailFilterUI(t *testing.T) {
+	summary := "test summary"
+
+	t.Run("filter input visible when active", func(t *testing.T) {
+		m := New(nil, "")
+		m.Height = 20
+		m.FilterActive = true
+		m.FilterInput.Focus()
+		// Don't set value — placeholder "Filter..." shows when empty
+		m.Projects = []store.ProjectStats{
+			{Name: "engram", SessionCount: 3, ObservationCount: 10, PromptCount: 5, LastActivityAt: "2026-01-01"},
+		}
+		m.SelectedProjectIdx = 0
+		m.ProjectSessions = []store.SessionSummary{
+			{ID: "s1", Project: "engram", StartedAt: "2026-01-01", Summary: &summary, ObservationCount: 5},
+		}
+
+		out := m.viewProjectDetail()
+		if !strings.Contains(out, "Filter") {
+			t.Fatal("project detail view should render filter input when FilterActive is true")
+		}
+		if !strings.Contains(out, "Sessions (1)") {
+			t.Fatal("project detail view should still show sessions heading")
+		}
+	})
+
+	t.Run("filtered indicator when blurred with query", func(t *testing.T) {
+		m := New(nil, "")
+		m.Height = 20
+		m.FilterActive = false
+		m.FilterQuery = "eng"
+		m.Projects = []store.ProjectStats{
+			{Name: "engram", SessionCount: 3, ObservationCount: 10, PromptCount: 5, LastActivityAt: "2026-01-01"},
+		}
+		m.SelectedProjectIdx = 0
+		m.ProjectSessions = []store.SessionSummary{
+			{ID: "s1", Project: "engram", StartedAt: "2026-01-01", Summary: &summary, ObservationCount: 5},
+		}
+
+		out := m.viewProjectDetail()
+		if !strings.Contains(out, "Filtered:") || !strings.Contains(out, "eng") {
+			t.Fatal("project detail view should show 'Filtered:' indicator when FilterQuery is set")
+		}
+		if !strings.Contains(out, "1 results") {
+			t.Fatal("project detail view should show result count in filtered indicator")
+		}
+	})
+
+	t.Run("filtered empty state", func(t *testing.T) {
+		m := New(nil, "")
+		m.Height = 20
+		m.FilterQuery = "nonexistent"
+		m.Projects = []store.ProjectStats{
+			{Name: "engram", SessionCount: 3, ObservationCount: 10, PromptCount: 5, LastActivityAt: "2026-01-01"},
+		}
+		m.SelectedProjectIdx = 0
+		m.ProjectSessions = nil
+
+		out := m.viewProjectDetail()
+		if !strings.Contains(out, "No sessions match the filter") {
+			t.Fatal("project detail view should show filter-specific empty state")
+		}
+		if !strings.Contains(out, "clear filter") {
+			t.Fatal("project detail view help bar should suggest clearing filter when filtered with no results")
+		}
+	})
+
+	t.Run("unfiltered empty state", func(t *testing.T) {
+		m := New(nil, "")
+		m.Height = 20
+		m.FilterQuery = ""
+		m.Projects = []store.ProjectStats{
+			{Name: "engram", SessionCount: 3, ObservationCount: 10, PromptCount: 5, LastActivityAt: "2026-01-01"},
+		}
+		m.SelectedProjectIdx = 0
+		m.ProjectSessions = nil
+
+		out := m.viewProjectDetail()
+		if !strings.Contains(out, "No sessions in this project") {
+			t.Fatal("project detail view should show normal empty state when not filtered")
+		}
+	})
+
+	t.Run("filtered help bar", func(t *testing.T) {
+		m := New(nil, "")
+		m.Height = 20
+		m.FilterQuery = "eng"
+		m.Projects = []store.ProjectStats{
+			{Name: "engram", SessionCount: 3, ObservationCount: 10, PromptCount: 5, LastActivityAt: "2026-01-01"},
+		}
+		m.SelectedProjectIdx = 0
+		m.ProjectSessions = []store.SessionSummary{
+			{ID: "s1", Project: "engram", StartedAt: "2026-01-01", ObservationCount: 1},
+		}
+
+		out := m.viewProjectDetail()
+		if !strings.Contains(out, "esc clear filter") {
+			t.Fatal("project detail help bar should show 'esc clear filter' when filtered")
+		}
+	})
+
+	t.Run("unfiltered help bar includes filter shortcut", func(t *testing.T) {
+		m := New(nil, "")
+		m.Height = 20
+		m.FilterQuery = ""
+		m.Projects = []store.ProjectStats{
+			{Name: "engram", SessionCount: 3, ObservationCount: 10, PromptCount: 5, LastActivityAt: "2026-01-01"},
+		}
+		m.SelectedProjectIdx = 0
+		m.ProjectSessions = []store.SessionSummary{
+			{ID: "s1", Project: "engram", StartedAt: "2026-01-01", ObservationCount: 1},
+		}
+
+		out := m.viewProjectDetail()
+		if !strings.Contains(out, "/ filter") {
+			t.Fatal("project detail help bar should show '/ filter' when not filtered")
+		}
+		if !strings.Contains(out, "D delete project") {
+			t.Fatal("project detail help bar should show 'D delete project' when not filtered")
+		}
+	})
+}
