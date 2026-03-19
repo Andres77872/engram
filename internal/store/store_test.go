@@ -22,6 +22,245 @@ func mustDefaultConfig(t *testing.T) Config {
 	return cfg
 }
 
+// ─── PromptCount in SessionSummary ───────────────────────────────────────────
+
+func TestSessionSummaryIncludesPromptCount(t *testing.T) {
+	s := newTestStore(t)
+
+	if err := s.CreateSession("s1", "engram", "/tmp"); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	// Add 3 prompts
+	for i := 0; i < 3; i++ {
+		if _, err := s.AddPrompt(AddPromptParams{SessionID: "s1", Content: "prompt text", Project: "engram"}); err != nil {
+			t.Fatalf("add prompt %d: %v", i, err)
+		}
+	}
+	// Add 1 observation
+	if _, err := s.AddObservation(AddObservationParams{
+		SessionID: "s1",
+		Type:      "note",
+		Title:     "test",
+		Content:   "test content",
+		Project:   "engram",
+		Scope:     "project",
+	}); err != nil {
+		t.Fatalf("add observation: %v", err)
+	}
+
+	all, err := s.AllSessions("", 10)
+	if err != nil {
+		t.Fatalf("AllSessions: %v", err)
+	}
+	if len(all) != 1 {
+		t.Fatalf("expected 1 session, got %d", len(all))
+	}
+	if all[0].PromptCount != 3 {
+		t.Fatalf("expected 3 prompts, got %d", all[0].PromptCount)
+	}
+	if all[0].ObservationCount != 1 {
+		t.Fatalf("expected 1 observation, got %d", all[0].ObservationCount)
+	}
+
+	recent, err := s.RecentSessions("", 10)
+	if err != nil {
+		t.Fatalf("RecentSessions: %v", err)
+	}
+	if len(recent) != 1 || recent[0].PromptCount != 3 {
+		t.Fatalf("RecentSessions: expected 3 prompts, got %d (len=%d)", recent[0].PromptCount, len(recent))
+	}
+
+	filtered, err := s.FilterSessions("s1", "", 10)
+	if err != nil {
+		t.Fatalf("FilterSessions: %v", err)
+	}
+	if len(filtered) != 1 || filtered[0].PromptCount != 3 {
+		t.Fatalf("FilterSessions: expected 3 prompts, got %d", filtered[0].PromptCount)
+	}
+}
+
+// ─── CountEmptySessions / DeleteEmptySessions ────────────────────────────────
+
+func TestCountEmptySessionsBasic(t *testing.T) {
+	s := newTestStore(t)
+
+	// Create 3 sessions: 1 with obs, 1 with summary, 1 empty
+	if err := s.CreateSession("s-with-obs", "engram", "/tmp"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.AddObservation(AddObservationParams{
+		SessionID: "s-with-obs",
+		Type:      "note",
+		Title:     "test",
+		Content:   "test",
+		Project:   "engram",
+		Scope:     "project",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := s.CreateSession("s-with-summary", "engram", "/tmp"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.EndSession("s-with-summary", "session summary text"); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := s.CreateSession("s-empty", "engram", "/tmp"); err != nil {
+		t.Fatal(err)
+	}
+
+	count, err := s.CountEmptySessions("")
+	if err != nil {
+		t.Fatalf("CountEmptySessions: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("expected 1 empty session, got %d", count)
+	}
+}
+
+func TestCountEmptySessionsScopedToProject(t *testing.T) {
+	s := newTestStore(t)
+
+	if err := s.CreateSession("s1", "engram", "/tmp"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.CreateSession("s2", "other", "/tmp"); err != nil {
+		t.Fatal(err)
+	}
+
+	count, err := s.CountEmptySessions("engram")
+	if err != nil {
+		t.Fatalf("CountEmptySessions: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("expected 1 empty session for engram, got %d", count)
+	}
+
+	countAll, err := s.CountEmptySessions("")
+	if err != nil {
+		t.Fatalf("CountEmptySessions all: %v", err)
+	}
+	if countAll != 2 {
+		t.Fatalf("expected 2 empty sessions total, got %d", countAll)
+	}
+}
+
+func TestCountEmptySessionsExcludesPrompts(t *testing.T) {
+	s := newTestStore(t)
+
+	if err := s.CreateSession("s-with-prompt", "engram", "/tmp"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.AddPrompt(AddPromptParams{SessionID: "s-with-prompt", Content: "hello", Project: "engram"}); err != nil {
+		t.Fatal(err)
+	}
+
+	count, err := s.CountEmptySessions("")
+	if err != nil {
+		t.Fatalf("CountEmptySessions: %v", err)
+	}
+	if count != 0 {
+		t.Fatalf("session with prompt should not be counted as empty, got %d", count)
+	}
+}
+
+func TestDeleteEmptySessionsBasic(t *testing.T) {
+	s := newTestStore(t)
+
+	if err := s.CreateSession("s-keep", "engram", "/tmp"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.AddObservation(AddObservationParams{
+		SessionID: "s-keep",
+		Type:      "note",
+		Title:     "test",
+		Content:   "test",
+		Project:   "engram",
+		Scope:     "project",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := s.CreateSession("s-empty1", "engram", "/tmp"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.CreateSession("s-empty2", "engram", "/tmp"); err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := s.DeleteEmptySessions("")
+	if err != nil {
+		t.Fatalf("DeleteEmptySessions: %v", err)
+	}
+	if result.SessionsDeleted != 2 {
+		t.Fatalf("expected 2 sessions deleted, got %d", result.SessionsDeleted)
+	}
+
+	// Verify only non-empty session remains
+	all, err := s.AllSessions("", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(all) != 1 || all[0].ID != "s-keep" {
+		t.Fatalf("expected only s-keep to remain, got %v", all)
+	}
+}
+
+func TestDeleteEmptySessionsScopedToProject(t *testing.T) {
+	s := newTestStore(t)
+
+	if err := s.CreateSession("s-engram", "engram", "/tmp"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.CreateSession("s-other", "other", "/tmp"); err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := s.DeleteEmptySessions("engram")
+	if err != nil {
+		t.Fatalf("DeleteEmptySessions: %v", err)
+	}
+	if result.SessionsDeleted != 1 {
+		t.Fatalf("expected 1 session deleted, got %d", result.SessionsDeleted)
+	}
+
+	// Verify other project session still exists
+	all, err := s.AllSessions("", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(all) != 1 || all[0].ID != "s-other" {
+		t.Fatalf("expected only s-other to remain, got %v", all)
+	}
+}
+
+func TestDeleteEmptySessionsNoEmpty(t *testing.T) {
+	s := newTestStore(t)
+
+	if err := s.CreateSession("s1", "engram", "/tmp"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.AddObservation(AddObservationParams{
+		SessionID: "s1",
+		Type:      "note",
+		Title:     "test",
+		Content:   "test",
+		Project:   "engram",
+		Scope:     "project",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := s.DeleteEmptySessions("")
+	if err != nil {
+		t.Fatalf("DeleteEmptySessions: %v", err)
+	}
+	if result.SessionsDeleted != 0 {
+		t.Fatalf("expected 0 sessions deleted, got %d", result.SessionsDeleted)
+	}
+}
+
 func newTestStore(t *testing.T) *Store {
 	t.Helper()
 	cfg := mustDefaultConfig(t)
