@@ -75,6 +75,14 @@ type Stats struct {
 	Projects          []string `json:"projects"`
 }
 
+type ProjectStats struct {
+	Name             string `json:"name"`
+	SessionCount     int    `json:"session_count"`
+	ObservationCount int    `json:"observation_count"`
+	PromptCount      int    `json:"prompt_count"`
+	LastActivityAt   string `json:"last_activity_at"`
+}
+
 type TimelineEntry struct {
 	ID             int64   `json:"id"`
 	SessionID      string  `json:"session_id"`
@@ -1277,6 +1285,347 @@ func (s *Store) DeleteObservation(id int64, hardDelete bool) error {
 	})
 }
 
+func (s *Store) DeleteSession(id string) error {
+	return s.withTx(func(tx *sql.Tx) error {
+		rows, err := tx.Query(
+			`SELECT id, sync_id FROM observations WHERE session_id = ?`,
+			id,
+		)
+		if err != nil {
+			return err
+		}
+		var obsIDs []int64
+		var obsSyncIDs []string
+		for rows.Next() {
+			var obsID int64
+			var syncID string
+			if err := rows.Scan(&obsID, &syncID); err != nil {
+				rows.Close()
+				return err
+			}
+			obsIDs = append(obsIDs, obsID)
+			obsSyncIDs = append(obsSyncIDs, syncID)
+		}
+		rows.Close()
+		if err := rows.Err(); err != nil {
+			return err
+		}
+
+		deletedAt := Now()
+		for i, obsID := range obsIDs {
+			if _, err := s.execHook(tx,
+				`UPDATE observations
+				 SET deleted_at = ?, updated_at = ?
+				 WHERE id = ? AND deleted_at IS NULL`,
+				deletedAt, deletedAt, obsID,
+			); err != nil {
+				return err
+			}
+			if err := s.enqueueSyncMutationTx(tx, SyncEntityObservation, obsSyncIDs[i], SyncOpDelete, syncObservationPayload{
+				SyncID:     obsSyncIDs[i],
+				Deleted:    true,
+				DeletedAt:  &deletedAt,
+				HardDelete: false,
+			}); err != nil {
+				return err
+			}
+		}
+
+		promptRows, err := tx.Query(
+			`SELECT sync_id FROM user_prompts WHERE session_id = ?`,
+			id,
+		)
+		if err != nil {
+			return err
+		}
+		var promptSyncIDs []string
+		for promptRows.Next() {
+			var syncID string
+			if err := promptRows.Scan(&syncID); err != nil {
+				promptRows.Close()
+				return err
+			}
+			promptSyncIDs = append(promptSyncIDs, syncID)
+		}
+		promptRows.Close()
+		if err := promptRows.Err(); err != nil {
+			return err
+		}
+
+		for _, syncID := range promptSyncIDs {
+			if _, err := s.execHook(tx, `DELETE FROM user_prompts WHERE sync_id = ?`, syncID); err != nil {
+				return err
+			}
+			if err := s.enqueueSyncMutationTx(tx, SyncEntityPrompt, syncID, SyncOpDelete, syncPromptPayload{
+				SyncID: syncID,
+			}); err != nil {
+				return err
+			}
+		}
+
+		if _, err := s.execHook(tx, `DELETE FROM sessions WHERE id = ?`, id); err != nil {
+			return err
+		}
+
+		return s.enqueueSyncMutationTx(tx, SyncEntitySession, id, SyncOpDelete, syncSessionPayload{
+			ID: id,
+		})
+	})
+}
+
+func (s *Store) ClearProjectSessions(project string) (*DeleteResult, error) {
+	if project == "" {
+		return nil, fmt.Errorf("project name must not be empty")
+	}
+
+	result := &DeleteResult{}
+	err := s.withTx(func(tx *sql.Tx) error {
+		obsRows, err := tx.Query(
+			`SELECT o.id, o.sync_id
+			 FROM observations o
+			 JOIN sessions s ON o.session_id = s.id
+			 WHERE s.project = ? AND o.deleted_at IS NULL`,
+			project,
+		)
+		if err != nil {
+			return err
+		}
+		var obsIDs []int64
+		var obsSyncIDs []string
+		for obsRows.Next() {
+			var obsID int64
+			var syncID string
+			if err := obsRows.Scan(&obsID, &syncID); err != nil {
+				obsRows.Close()
+				return err
+			}
+			obsIDs = append(obsIDs, obsID)
+			obsSyncIDs = append(obsSyncIDs, syncID)
+		}
+		obsRows.Close()
+		if err := obsRows.Err(); err != nil {
+			return err
+		}
+
+		deletedAt := Now()
+		for i, obsID := range obsIDs {
+			if _, err := s.execHook(tx,
+				`UPDATE observations
+				 SET deleted_at = ?, updated_at = ?
+				 WHERE id = ?`,
+				deletedAt, deletedAt, obsID,
+			); err != nil {
+				return err
+			}
+			if err := s.enqueueSyncMutationTx(tx, SyncEntityObservation, obsSyncIDs[i], SyncOpDelete, syncObservationPayload{
+				SyncID:     obsSyncIDs[i],
+				Deleted:    true,
+				DeletedAt:  &deletedAt,
+				HardDelete: false,
+			}); err != nil {
+				return err
+			}
+			result.ObservationsDeleted++
+		}
+
+		promptRows, err := tx.Query(
+			`SELECT p.sync_id
+			 FROM user_prompts p
+			 JOIN sessions s ON p.session_id = s.id
+			 WHERE s.project = ?`,
+			project,
+		)
+		if err != nil {
+			return err
+		}
+		var promptSyncIDs []string
+		for promptRows.Next() {
+			var syncID string
+			if err := promptRows.Scan(&syncID); err != nil {
+				promptRows.Close()
+				return err
+			}
+			promptSyncIDs = append(promptSyncIDs, syncID)
+		}
+		promptRows.Close()
+		if err := promptRows.Err(); err != nil {
+			return err
+		}
+
+		for _, syncID := range promptSyncIDs {
+			if _, err := s.execHook(tx, `DELETE FROM user_prompts WHERE sync_id = ?`, syncID); err != nil {
+				return err
+			}
+			if err := s.enqueueSyncMutationTx(tx, SyncEntityPrompt, syncID, SyncOpDelete, syncPromptPayload{
+				SyncID: syncID,
+			}); err != nil {
+				return err
+			}
+			result.PromptsDeleted++
+		}
+
+		sessionRows, err := tx.Query(`SELECT id FROM sessions WHERE project = ?`, project)
+		if err != nil {
+			return err
+		}
+		var sessionIDs []string
+		for sessionRows.Next() {
+			var sessionID string
+			if err := sessionRows.Scan(&sessionID); err != nil {
+				sessionRows.Close()
+				return err
+			}
+			sessionIDs = append(sessionIDs, sessionID)
+		}
+		sessionRows.Close()
+		if err := sessionRows.Err(); err != nil {
+			return err
+		}
+
+		for _, sessionID := range sessionIDs {
+			if _, err := s.execHook(tx, `DELETE FROM sessions WHERE id = ?`, sessionID); err != nil {
+				return err
+			}
+			if err := s.enqueueSyncMutationTx(tx, SyncEntitySession, sessionID, SyncOpDelete, syncSessionPayload{
+				ID: sessionID,
+			}); err != nil {
+				return err
+			}
+			result.SessionsDeleted++
+		}
+
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return result, nil
+}
+
+func (s *Store) DeleteProject(project string) (*DeleteResult, error) {
+	if project == "" {
+		return nil, fmt.Errorf("project name must not be empty")
+	}
+
+	result := &DeleteResult{}
+	err := s.withTx(func(tx *sql.Tx) error {
+		obsRows, err := tx.Query(
+			`SELECT id, sync_id FROM observations WHERE project = ?`,
+			project,
+		)
+		if err != nil {
+			return err
+		}
+		var obsData []struct {
+			id     int64
+			syncID string
+		}
+		for obsRows.Next() {
+			var id int64
+			var syncID string
+			if err := obsRows.Scan(&id, &syncID); err != nil {
+				obsRows.Close()
+				return err
+			}
+			obsData = append(obsData, struct {
+				id     int64
+				syncID string
+			}{id, syncID})
+		}
+		obsRows.Close()
+		if err := obsRows.Err(); err != nil {
+			return err
+		}
+
+		for _, od := range obsData {
+			if _, err := s.execHook(tx, `DELETE FROM observations WHERE id = ?`, od.id); err != nil {
+				return err
+			}
+			if err := s.enqueueSyncMutationTx(tx, SyncEntityObservation, od.syncID, SyncOpDelete, syncObservationPayload{
+				SyncID:     od.syncID,
+				Deleted:    true,
+				HardDelete: true,
+			}); err != nil {
+				return err
+			}
+			result.ObservationsDeleted++
+		}
+
+		promptRows, err := tx.Query(
+			`SELECT sync_id FROM user_prompts WHERE project = ?`,
+			project,
+		)
+		if err != nil {
+			return err
+		}
+		var promptSyncIDs []string
+		for promptRows.Next() {
+			var syncID string
+			if err := promptRows.Scan(&syncID); err != nil {
+				promptRows.Close()
+				return err
+			}
+			promptSyncIDs = append(promptSyncIDs, syncID)
+		}
+		promptRows.Close()
+		if err := promptRows.Err(); err != nil {
+			return err
+		}
+
+		for _, syncID := range promptSyncIDs {
+			if _, err := s.execHook(tx, `DELETE FROM user_prompts WHERE sync_id = ?`, syncID); err != nil {
+				return err
+			}
+			if err := s.enqueueSyncMutationTx(tx, SyncEntityPrompt, syncID, SyncOpDelete, syncPromptPayload{
+				SyncID: syncID,
+			}); err != nil {
+				return err
+			}
+			result.PromptsDeleted++
+		}
+
+		sessionRows, err := tx.Query(`SELECT id FROM sessions WHERE project = ?`, project)
+		if err != nil {
+			return err
+		}
+		var sessionIDs []string
+		for sessionRows.Next() {
+			var sessionID string
+			if err := sessionRows.Scan(&sessionID); err != nil {
+				sessionRows.Close()
+				return err
+			}
+			sessionIDs = append(sessionIDs, sessionID)
+		}
+		sessionRows.Close()
+		if err := sessionRows.Err(); err != nil {
+			return err
+		}
+
+		for _, sessionID := range sessionIDs {
+			if _, err := s.execHook(tx, `DELETE FROM sessions WHERE id = ?`, sessionID); err != nil {
+				return err
+			}
+			if err := s.enqueueSyncMutationTx(tx, SyncEntitySession, sessionID, SyncOpDelete, syncSessionPayload{
+				ID: sessionID,
+			}); err != nil {
+				return err
+			}
+			result.SessionsDeleted++
+		}
+
+		if _, err := s.execHook(tx, `DELETE FROM sync_enrolled_projects WHERE project = ?`, project); err != nil {
+			return err
+		}
+
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return result, nil
+}
+
 // ─── Timeline ────────────────────────────────────────────────────────────────
 //
 // Timeline provides chronological context around a specific observation.
@@ -1472,6 +1821,49 @@ func (s *Store) Stats() (*Stats, error) {
 	}
 
 	return stats, nil
+}
+
+func (s *Store) ListProjectStats() ([]ProjectStats, error) {
+	query := `
+		SELECT 
+			p.name,
+			COALESCE((SELECT COUNT(*) FROM sessions WHERE project = p.name), 0) as session_count,
+			COALESCE((SELECT COUNT(*) FROM observations WHERE project = p.name AND deleted_at IS NULL), 0) as observation_count,
+			COALESCE((SELECT COUNT(*) FROM user_prompts WHERE project = p.name), 0) as prompt_count,
+			COALESCE(
+				(SELECT MAX(m) FROM (
+					SELECT MAX(started_at) as m FROM sessions WHERE project = p.name
+					UNION ALL
+					SELECT MAX(created_at) as m FROM observations WHERE project = p.name AND deleted_at IS NULL
+				)), ''
+			) as last_activity_at
+		FROM (
+			SELECT DISTINCT project as name FROM observations WHERE project IS NOT NULL AND project != '' AND deleted_at IS NULL
+			UNION
+			SELECT DISTINCT project as name FROM sessions WHERE project IS NOT NULL AND project != ''
+		) p
+		ORDER BY last_activity_at DESC
+	`
+
+	rows, err := s.queryItHook(s.db, query)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var results []ProjectStats
+	for rows.Next() {
+		var ps ProjectStats
+		if err := rows.Scan(&ps.Name, &ps.SessionCount, &ps.ObservationCount, &ps.PromptCount, &ps.LastActivityAt); err != nil {
+			return nil, err
+		}
+		results = append(results, ps)
+	}
+	return results, rows.Err()
+}
+
+func (s *Store) ProjectSessions(project string, limit int) ([]SessionSummary, error) {
+	return s.AllSessions(project, limit)
 }
 
 // ─── Context Formatting ─────────────────────────────────────────────────────
@@ -2082,6 +2474,12 @@ type MigrateResult struct {
 	ObservationsUpdated int64 `json:"observations_updated"`
 	SessionsUpdated     int64 `json:"sessions_updated"`
 	PromptsUpdated      int64 `json:"prompts_updated"`
+}
+
+type DeleteResult struct {
+	SessionsDeleted     int `json:"sessions_deleted"`
+	ObservationsDeleted int `json:"observations_deleted"`
+	PromptsDeleted      int `json:"prompts_deleted"`
 }
 
 func (s *Store) MigrateProject(oldName, newName string) (*MigrateResult, error) {

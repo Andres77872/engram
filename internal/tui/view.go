@@ -76,15 +76,26 @@ func (m Model) View() string {
 		content = m.viewSessions()
 	case ScreenSessionDetail:
 		content = m.viewSessionDetail()
+	case ScreenProjects:
+		content = m.viewProjects()
+	case ScreenProjectDetail:
+		content = m.viewProjectDetail()
 	case ScreenSetup:
 		content = m.viewSetup()
 	default:
 		content = "Unknown screen"
 	}
 
-	// Show error if present
+	if m.SuccessMsg != "" {
+		content = successStyle.Render(m.SuccessMsg) + "\n" + content
+	}
+
 	if m.ErrorMsg != "" {
 		content += "\n" + errorStyle.Render("Error: "+m.ErrorMsg)
+	}
+
+	if m.ConfirmActive {
+		content += "\n" + m.renderConfirmDialog()
 	}
 
 	return appStyle.Render(content)
@@ -158,8 +169,7 @@ func (m Model) viewDashboard() string {
 		b.WriteString("\n")
 	}
 
-	// Help
-	b.WriteString(helpStyle.Render("\n  j/k navigate • enter select • s search • q quit"))
+	b.WriteString(helpStyle.Render("\n  ↑↓ navigate • enter select • s search • q quit"))
 
 	return b.String()
 }
@@ -175,7 +185,7 @@ func (m Model) viewSearch() string {
 	b.WriteString(searchInputStyle.Render(m.SearchInput.View()))
 	b.WriteString("\n\n")
 
-	b.WriteString(helpStyle.Render("  Type a query and press enter • esc go back"))
+	b.WriteString(helpStyle.Render("  enter search • esc cancel"))
 
 	return b.String()
 }
@@ -215,13 +225,12 @@ func (m Model) viewSearchResults() string {
 		b.WriteString(m.renderObservationListItem(i, r.ID, r.Type, r.Title, r.Content, r.CreatedAt, r.Project))
 	}
 
-	// Scroll indicator
 	if resultCount > visibleItems {
 		b.WriteString(fmt.Sprintf("\n  %s",
 			timestampStyle.Render(fmt.Sprintf("showing %d-%d of %d", m.Scroll+1, end, resultCount))))
 	}
 
-	b.WriteString(helpStyle.Render("\n  j/k navigate • enter detail • t timeline • / search • esc back"))
+	b.WriteString(helpStyle.Render("\n  ↑↓ navigate • enter detail • t timeline • / search • esc back"))
 
 	return b.String()
 }
@@ -263,7 +272,7 @@ func (m Model) viewRecent() string {
 			timestampStyle.Render(fmt.Sprintf("showing %d-%d of %d", m.Scroll+1, end, count))))
 	}
 
-	b.WriteString(helpStyle.Render("\n  j/k navigate • enter detail • t timeline • esc back"))
+	b.WriteString(helpStyle.Render("\n  ↑↓ navigate • enter detail • t timeline • esc back"))
 
 	return b.String()
 }
@@ -351,7 +360,7 @@ func (m Model) viewObservationDetail() string {
 			timestampStyle.Render(fmt.Sprintf("line %d-%d of %d", m.DetailScroll+1, end, len(contentLines)))))
 	}
 
-	b.WriteString(helpStyle.Render("\n  j/k scroll • t timeline • esc back"))
+	b.WriteString(helpStyle.Render("\n  ↑↓ scroll • t timeline • esc back"))
 
 	return b.String()
 }
@@ -419,7 +428,7 @@ func (m Model) viewTimeline() string {
 		}
 	}
 
-	b.WriteString(helpStyle.Render("\n  j/k scroll • esc back"))
+	b.WriteString(helpStyle.Render("\n  ↑↓ scroll • esc back"))
 
 	return b.String()
 }
@@ -481,7 +490,7 @@ func (m Model) viewSessions() string {
 			timestampStyle.Render(fmt.Sprintf("showing %d-%d of %d", m.Scroll+1, end, count))))
 	}
 
-	b.WriteString(helpStyle.Render("\n  j/k navigate • enter view session • esc back"))
+	b.WriteString(helpStyle.Render("\n  ↑↓ navigate • enter details • d delete • esc back • q quit"))
 
 	return b.String()
 }
@@ -541,7 +550,160 @@ func (m Model) viewSessionDetail() string {
 			timestampStyle.Render(fmt.Sprintf("showing %d-%d of %d", m.SessionDetailScroll+1, end, count))))
 	}
 
-	b.WriteString(helpStyle.Render("\n  j/k navigate • enter detail • t timeline • esc back"))
+	b.WriteString(helpStyle.Render("\n  ↑↓ scroll • d delete session • c clear project • D delete project • esc back"))
+
+	return b.String()
+}
+
+// ─── Projects ────────────────────────────────────────────────────────────────
+
+func (m Model) viewProjects() string {
+	var b strings.Builder
+
+	count := len(m.Projects)
+	header := fmt.Sprintf("  Projects — %d total", count)
+	b.WriteString(headerStyle.Render(header))
+	b.WriteString("\n")
+
+	if count == 0 {
+		b.WriteString(noResultsStyle.Render("No projects yet."))
+		b.WriteString("\n\n")
+		b.WriteString(helpStyle.Render("  esc back"))
+		return b.String()
+	}
+
+	visibleItems := m.Height - 8
+	if visibleItems < 5 {
+		visibleItems = 5
+	}
+
+	end := m.Scroll + visibleItems
+	if end > count {
+		end = count
+	}
+
+	for i := m.Scroll; i < end; i++ {
+		p := m.Projects[i]
+		cursor := "  "
+		style := listItemStyle
+		if i == m.Cursor {
+			cursor = "▸ "
+			style = listSelectedStyle
+		}
+
+		// Project name with stats
+		line := fmt.Sprintf("%s%s  %s sess  %s obs  %s prompts",
+			cursor,
+			style.Render(fmt.Sprintf("%-20s", p.Name)),
+			statNumberStyle.Render(fmt.Sprintf("%d", p.SessionCount)),
+			statNumberStyle.Render(fmt.Sprintf("%d", p.ObservationCount)),
+			statNumberStyle.Render(fmt.Sprintf("%d", p.PromptCount)))
+
+		b.WriteString(line)
+		b.WriteString("\n")
+
+		// Last activity on second line
+		if p.LastActivityAt != "" {
+			b.WriteString(contentPreviewStyle.Render("last activity: " + localTime(p.LastActivityAt)))
+			b.WriteString("\n")
+		}
+	}
+
+	if count > visibleItems {
+		b.WriteString(fmt.Sprintf("\n  %s",
+			timestampStyle.Render(fmt.Sprintf("showing %d-%d of %d", m.Scroll+1, end, count))))
+	}
+
+	b.WriteString(helpStyle.Render("\n  ↑↓ navigate • enter details • c clear sessions • d delete project • esc back"))
+
+	return b.String()
+}
+
+// ─── Project Detail ──────────────────────────────────────────────────────────
+
+func (m Model) viewProjectDetail() string {
+	var b strings.Builder
+
+	if m.SelectedProjectIdx >= len(m.Projects) {
+		b.WriteString(headerStyle.Render("  Project Detail"))
+		b.WriteString("\n")
+		b.WriteString(noResultsStyle.Render("Project not found."))
+		return b.String()
+	}
+
+	proj := m.Projects[m.SelectedProjectIdx]
+	header := fmt.Sprintf("  Project: %s", proj.Name)
+	b.WriteString(headerStyle.Render(header))
+	b.WriteString("\n")
+
+	// Project stats
+	b.WriteString(fmt.Sprintf("  %s %s  %s %s  %s %s\n",
+		statNumberStyle.Render(fmt.Sprintf("%d", proj.SessionCount)),
+		statLabelStyle.Render("sessions"),
+		statNumberStyle.Render(fmt.Sprintf("%d", proj.ObservationCount)),
+		statLabelStyle.Render("observations"),
+		statNumberStyle.Render(fmt.Sprintf("%d", proj.PromptCount)),
+		statLabelStyle.Render("prompts")))
+
+	if proj.LastActivityAt != "" {
+		b.WriteString(fmt.Sprintf("  %s %s\n",
+			detailLabelStyle.Render("Last activity:"),
+			timestampStyle.Render(localTime(proj.LastActivityAt))))
+	}
+	b.WriteString("\n")
+
+	// Sessions list
+	count := len(m.ProjectSessions)
+	b.WriteString(sectionHeadingStyle.Render(fmt.Sprintf("  Sessions (%d)", count)))
+	b.WriteString("\n")
+
+	if count == 0 {
+		b.WriteString(noResultsStyle.Render("No sessions in this project."))
+		b.WriteString("\n\n")
+		b.WriteString(helpStyle.Render("  c clear sessions • D delete project • esc back"))
+		return b.String()
+	}
+
+	visibleItems := m.Height - 10
+	if visibleItems < 5 {
+		visibleItems = 5
+	}
+
+	end := m.ProjectDetailScroll + visibleItems
+	if end > count {
+		end = count
+	}
+
+	for i := m.ProjectDetailScroll; i < end; i++ {
+		s := m.ProjectSessions[i]
+		cursor := "  "
+		style := listItemStyle
+		if i == m.Cursor {
+			cursor = "▸ "
+			style = listSelectedStyle
+		}
+
+		summary := ""
+		if s.Summary != nil {
+			summary = truncateStr(*s.Summary, 40)
+		}
+
+		line := fmt.Sprintf("%s%s  %s obs  %s",
+			cursor,
+			timestampStyle.Render(localTime(s.StartedAt)),
+			statNumberStyle.Render(fmt.Sprintf("%d", s.ObservationCount)),
+			style.Render(summary))
+
+		b.WriteString(line)
+		b.WriteString("\n")
+	}
+
+	if count > visibleItems {
+		b.WriteString(fmt.Sprintf("\n  %s",
+			timestampStyle.Render(fmt.Sprintf("showing %d-%d of %d", m.ProjectDetailScroll+1, end, count))))
+	}
+
+	b.WriteString(helpStyle.Render("\n  ↑↓ navigate • enter session • c clear sessions • D delete project • esc back"))
 
 	return b.String()
 }
@@ -714,11 +876,28 @@ func localTime(utc string) string {
 }
 
 func truncateStr(s string, max int) string {
-	// Remove newlines for single-line display
 	s = strings.ReplaceAll(s, "\n", " ")
 	runes := []rune(s)
 	if len(runes) <= max {
 		return s
 	}
 	return string(runes[:max]) + "..."
+}
+
+func (m Model) renderConfirmDialog() string {
+	var b strings.Builder
+
+	b.WriteString(confirmBoxStyle.Render(""))
+	b.WriteString("\n")
+	b.WriteString(confirmWarningStyle.Render("  ⚠ " + m.ConfirmMsg))
+	b.WriteString("\n")
+
+	if m.ConfirmDetail != "" {
+		b.WriteString(detailContentStyle.Render("  " + m.ConfirmDetail))
+		b.WriteString("\n")
+	}
+
+	b.WriteString(helpStyle.Render("\n  [y] Confirm  [n/esc] Cancel"))
+
+	return b.String()
 }
