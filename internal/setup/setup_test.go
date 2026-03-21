@@ -25,10 +25,12 @@ func resetSetupSeams(t *testing.T) {
 	oldInjectOpenCodeMCPFn := injectOpenCodeMCPFn
 	oldInjectGeminiMCPFn := injectGeminiMCPFn
 	oldWriteGeminiSystemPromptFn := writeGeminiSystemPromptFn
-oldWriteCodexMemoryInstructionFilesFn := writeCodexMemoryInstructionFilesFn
+	oldWriteCodexMemoryInstructionFilesFn := writeCodexMemoryInstructionFilesFn
 	oldInjectCodexMCPFn := injectCodexMCPFn
 	oldInjectCodexMemoryConfigFn := injectCodexMemoryConfigFn
 	oldAddClaudeCodeAllowlistFn := addClaudeCodeAllowlistFn
+	oldOsExecutable := osExecutable
+	oldWriteClaudeCodeUserMCPFn := writeClaudeCodeUserMCPFn
 
 	t.Cleanup(func() {
 		runtimeGOOS = oldRuntimeGOOS
@@ -45,10 +47,12 @@ oldWriteCodexMemoryInstructionFilesFn := writeCodexMemoryInstructionFilesFn
 		injectOpenCodeMCPFn = oldInjectOpenCodeMCPFn
 		injectGeminiMCPFn = oldInjectGeminiMCPFn
 		writeGeminiSystemPromptFn = oldWriteGeminiSystemPromptFn
-writeCodexMemoryInstructionFilesFn = oldWriteCodexMemoryInstructionFilesFn
+		writeCodexMemoryInstructionFilesFn = oldWriteCodexMemoryInstructionFilesFn
 		injectCodexMCPFn = oldInjectCodexMCPFn
 		injectCodexMemoryConfigFn = oldInjectCodexMemoryConfigFn
 		addClaudeCodeAllowlistFn = oldAddClaudeCodeAllowlistFn
+		osExecutable = oldOsExecutable
+		writeClaudeCodeUserMCPFn = oldWriteClaudeCodeUserMCPFn
 	})
 }
 
@@ -576,7 +580,9 @@ func TestInstallClaudeCodeBranches(t *testing.T) {
 
 	t.Run("marketplace already then install success", func(t *testing.T) {
 		resetSetupSeams(t)
+		home := useTestHome(t)
 		lookPathFn = func(string) (string, error) { return "claude", nil }
+		writeClaudeCodeUserMCPFn = func() error { return nil }
 		calls := 0
 		runCommand = func(_ string, args ...string) ([]byte, error) {
 			calls++
@@ -596,14 +602,24 @@ func TestInstallClaudeCodeBranches(t *testing.T) {
 		if err != nil {
 			t.Fatalf("expected success, got %v", err)
 		}
-		if result.Agent != "claude-code" || result.Files != 0 {
-			t.Fatalf("unexpected result: %#v", result)
+		if result.Agent != "claude-code" {
+			t.Fatalf("unexpected agent: %q", result.Agent)
+		}
+		// When writeClaudeCodeUserMCP succeeds, files == 1
+		if result.Files != 1 {
+			t.Fatalf("expected 1 file when user MCP write succeeds, got %d", result.Files)
+		}
+		// Destination should point to the .claude/mcp dir, not be empty
+		expectedDir := filepath.Join(home, ".claude", "mcp")
+		if result.Destination != expectedDir {
+			t.Fatalf("expected destination %q, got %q", expectedDir, result.Destination)
 		}
 	})
 
 	t.Run("install hard failure", func(t *testing.T) {
 		resetSetupSeams(t)
 		lookPathFn = func(string) (string, error) { return "claude", nil }
+		writeClaudeCodeUserMCPFn = func() error { return nil }
 		calls := 0
 		runCommand = func(string, ...string) ([]byte, error) {
 			calls++
@@ -621,7 +637,9 @@ func TestInstallClaudeCodeBranches(t *testing.T) {
 
 	t.Run("install already is success", func(t *testing.T) {
 		resetSetupSeams(t)
+		useTestHome(t)
 		lookPathFn = func(string) (string, error) { return "claude", nil }
+		writeClaudeCodeUserMCPFn = func() error { return nil }
 		calls := 0
 		runCommand = func(string, ...string) ([]byte, error) {
 			calls++
@@ -633,6 +651,294 @@ func TestInstallClaudeCodeBranches(t *testing.T) {
 
 		if _, err := installClaudeCode(); err != nil {
 			t.Fatalf("expected already-installed branch to succeed, got %v", err)
+		}
+	})
+
+	t.Run("user mcp write failure is non-fatal", func(t *testing.T) {
+		resetSetupSeams(t)
+		useTestHome(t)
+		lookPathFn = func(string) (string, error) { return "claude", nil }
+		runCommand = func(string, ...string) ([]byte, error) { return []byte("ok"), nil }
+		writeClaudeCodeUserMCPFn = func() error { return errors.New("disk full") }
+
+		result, err := installClaudeCode()
+		if err != nil {
+			t.Fatalf("user MCP write failure should be non-fatal, got %v", err)
+		}
+		// files == 0 when writeClaudeCodeUserMCP fails
+		if result.Files != 0 {
+			t.Fatalf("expected 0 files when user MCP write fails, got %d", result.Files)
+		}
+	})
+}
+
+// ─── Issue #100: Windows PATH fix ────────────────────────────────────────────
+
+func TestWriteClaudeCodeUserMCP(t *testing.T) {
+	t.Run("writes json with absolute binary path", func(t *testing.T) {
+		resetSetupSeams(t)
+		home := useTestHome(t)
+		osExecutable = func() (string, error) { return "/usr/local/bin/engram", nil }
+
+		if err := writeClaudeCodeUserMCP(); err != nil {
+			t.Fatalf("writeClaudeCodeUserMCP failed: %v", err)
+		}
+
+		mcpPath := filepath.Join(home, ".claude", "mcp", "engram.json")
+		raw, err := os.ReadFile(mcpPath)
+		if err != nil {
+			t.Fatalf("read mcp config: %v", err)
+		}
+
+		var cfg map[string]any
+		if err := json.Unmarshal(raw, &cfg); err != nil {
+			t.Fatalf("parse mcp config: %v", err)
+		}
+
+		if cfg["command"] != "/usr/local/bin/engram" {
+			t.Fatalf("expected absolute path command, got %#v", cfg["command"])
+		}
+		args, ok := cfg["args"].([]any)
+		if !ok || len(args) != 2 || args[0] != "mcp" || args[1] != "--tools=agent" {
+			t.Fatalf("expected args [mcp --tools=agent], got %#v", cfg["args"])
+		}
+	})
+
+	t.Run("overwrites existing (idempotent — always refreshes path)", func(t *testing.T) {
+		resetSetupSeams(t)
+		home := useTestHome(t)
+		osExecutable = func() (string, error) { return "/new/path/engram", nil }
+
+		mcpDir := filepath.Join(home, ".claude", "mcp")
+		if err := os.MkdirAll(mcpDir, 0755); err != nil {
+			t.Fatalf("mkdir: %v", err)
+		}
+		if err := os.WriteFile(filepath.Join(mcpDir, "engram.json"), []byte(`{"command":"old"}`), 0644); err != nil {
+			t.Fatalf("write old config: %v", err)
+		}
+
+		if err := writeClaudeCodeUserMCP(); err != nil {
+			t.Fatalf("writeClaudeCodeUserMCP failed: %v", err)
+		}
+
+		raw, err := os.ReadFile(filepath.Join(mcpDir, "engram.json"))
+		if err != nil {
+			t.Fatalf("read updated config: %v", err)
+		}
+		var cfg map[string]any
+		if err := json.Unmarshal(raw, &cfg); err != nil {
+			t.Fatalf("parse config: %v", err)
+		}
+		if cfg["command"] != "/new/path/engram" {
+			t.Fatalf("expected updated command, got %#v", cfg["command"])
+		}
+	})
+
+	t.Run("os.Executable failure returns error", func(t *testing.T) {
+		resetSetupSeams(t)
+		useTestHome(t)
+		osExecutable = func() (string, error) { return "", errors.New("exec not found") }
+
+		err := writeClaudeCodeUserMCP()
+		if err == nil || !strings.Contains(err.Error(), "resolve binary path") {
+			t.Fatalf("expected resolve binary path error, got %v", err)
+		}
+	})
+
+	t.Run("marshal error returns error", func(t *testing.T) {
+		resetSetupSeams(t)
+		useTestHome(t)
+		osExecutable = func() (string, error) { return "/bin/engram", nil }
+		jsonMarshalIndentFn = func(any, string, string) ([]byte, error) {
+			return nil, errors.New("marshal boom")
+		}
+
+		err := writeClaudeCodeUserMCP()
+		if err == nil || !strings.Contains(err.Error(), "marshal mcp config") {
+			t.Fatalf("expected marshal mcp config error, got %v", err)
+		}
+	})
+
+	t.Run("write error returns error", func(t *testing.T) {
+		resetSetupSeams(t)
+		home := useTestHome(t)
+		osExecutable = func() (string, error) { return "/bin/engram", nil }
+		// Make ~/.claude/mcp/engram.json a directory so write fails
+		mcpDir := filepath.Join(home, ".claude", "mcp")
+		if err := os.MkdirAll(mcpDir, 0755); err != nil {
+			t.Fatalf("mkdir: %v", err)
+		}
+		if err := os.MkdirAll(filepath.Join(mcpDir, "engram.json"), 0755); err != nil {
+			t.Fatalf("create dir as file: %v", err)
+		}
+
+		err := writeClaudeCodeUserMCP()
+		if err == nil || !strings.Contains(err.Error(), "write mcp config") {
+			t.Fatalf("expected write mcp config error, got %v", err)
+		}
+	})
+
+	t.Run("create dir error returns error", func(t *testing.T) {
+		resetSetupSeams(t)
+		// Block ~/.claude/mcp creation by making .claude a file
+		blocked := t.TempDir()
+		if err := os.WriteFile(filepath.Join(blocked, ".claude"), []byte("x"), 0644); err != nil {
+			t.Fatalf("write blocking file: %v", err)
+		}
+		userHomeDir = func() (string, error) { return blocked, nil }
+		osExecutable = func() (string, error) { return "/bin/engram", nil }
+
+		err := writeClaudeCodeUserMCP()
+		if err == nil || !strings.Contains(err.Error(), "create mcp dir") {
+			t.Fatalf("expected create mcp dir error, got %v", err)
+		}
+	})
+}
+
+func TestResolveEngramCommand(t *testing.T) {
+	t.Run("unix returns bare name", func(t *testing.T) {
+		resetSetupSeams(t)
+		runtimeGOOS = "linux"
+		osExecutable = func() (string, error) { return "/usr/local/bin/engram", nil }
+
+		if got := resolveEngramCommand(); got != "engram" {
+			t.Fatalf("expected bare 'engram' on unix, got %q", got)
+		}
+	})
+
+	t.Run("darwin returns bare name", func(t *testing.T) {
+		resetSetupSeams(t)
+		runtimeGOOS = "darwin"
+		osExecutable = func() (string, error) { return "/opt/homebrew/bin/engram", nil }
+
+		if got := resolveEngramCommand(); got != "engram" {
+			t.Fatalf("expected bare 'engram' on darwin, got %q", got)
+		}
+	})
+
+	t.Run("windows returns absolute path", func(t *testing.T) {
+		resetSetupSeams(t)
+		runtimeGOOS = "windows"
+		osExecutable = func() (string, error) { return `C:\Users\user\bin\engram.exe`, nil }
+
+		got := resolveEngramCommand()
+		// EvalSymlinks may change the path on real OS but in tests it should
+		// either equal the input or the resolved form — either way not bare "engram"
+		if got == "engram" {
+			t.Fatalf("expected absolute path on windows, got bare 'engram'")
+		}
+		if !strings.Contains(got, "engram") {
+			t.Fatalf("expected engram in path, got %q", got)
+		}
+	})
+
+	t.Run("windows executable error falls back to bare name", func(t *testing.T) {
+		resetSetupSeams(t)
+		runtimeGOOS = "windows"
+		osExecutable = func() (string, error) { return "", errors.New("no executable") }
+
+		if got := resolveEngramCommand(); got != "engram" {
+			t.Fatalf("expected fallback to bare 'engram', got %q", got)
+		}
+	})
+}
+
+func TestClaudeCodeMCPDirPaths(t *testing.T) {
+	resetSetupSeams(t)
+	userHomeDir = func() (string, error) { return "/home/tester", nil }
+
+	expectedDir := filepath.Join("/home/tester", ".claude", "mcp")
+	if got := claudeCodeMCPDir(); got != expectedDir {
+		t.Fatalf("expected %s, got %s", expectedDir, got)
+	}
+
+	expectedPath := filepath.Join("/home/tester", ".claude", "mcp", "engram.json")
+	if got := claudeCodeUserMCPPath(); got != expectedPath {
+		t.Fatalf("expected %s, got %s", expectedPath, got)
+	}
+}
+
+func TestGeminiInjectUsesAbsolutePathOnWindows(t *testing.T) {
+	t.Run("windows uses absolute path", func(t *testing.T) {
+		resetSetupSeams(t)
+		runtimeGOOS = "windows"
+		osExecutable = func() (string, error) { return `C:\Users\user\bin\engram.exe`, nil }
+
+		configPath := filepath.Join(t.TempDir(), "settings.json")
+		if err := injectGeminiMCP(configPath); err != nil {
+			t.Fatalf("injectGeminiMCP failed: %v", err)
+		}
+
+		raw, err := os.ReadFile(configPath)
+		if err != nil {
+			t.Fatalf("read config: %v", err)
+		}
+		var cfg map[string]any
+		if err := json.Unmarshal(raw, &cfg); err != nil {
+			t.Fatalf("parse config: %v", err)
+		}
+		mcpServers := cfg["mcpServers"].(map[string]any)
+		engram := mcpServers["engram"].(map[string]any)
+		cmd := engram["command"].(string)
+		if cmd == "engram" {
+			t.Fatalf("expected absolute path on windows, got bare 'engram'")
+		}
+		if !strings.Contains(cmd, "engram") {
+			t.Fatalf("expected engram in command path, got %q", cmd)
+		}
+	})
+
+	t.Run("unix uses bare name", func(t *testing.T) {
+		resetSetupSeams(t)
+		runtimeGOOS = "linux"
+
+		configPath := filepath.Join(t.TempDir(), "settings.json")
+		if err := injectGeminiMCP(configPath); err != nil {
+			t.Fatalf("injectGeminiMCP failed: %v", err)
+		}
+
+		raw, err := os.ReadFile(configPath)
+		if err != nil {
+			t.Fatalf("read config: %v", err)
+		}
+		var cfg map[string]any
+		if err := json.Unmarshal(raw, &cfg); err != nil {
+			t.Fatalf("parse config: %v", err)
+		}
+		mcpServers := cfg["mcpServers"].(map[string]any)
+		engram := mcpServers["engram"].(map[string]any)
+		if got := engram["command"]; got != "engram" {
+			t.Fatalf("expected bare 'engram' on unix, got %#v", got)
+		}
+	})
+}
+
+func TestCodexBlockUsesAbsolutePathOnWindows(t *testing.T) {
+	t.Run("windows uses absolute path in codex block", func(t *testing.T) {
+		resetSetupSeams(t)
+		runtimeGOOS = "windows"
+		osExecutable = func() (string, error) { return `C:\Users\user\bin\engram.exe`, nil }
+
+		block := codexEngramBlockStr()
+		if strings.Contains(block, `"engram"`) && !strings.Contains(block, `C:\`) {
+			// The block should contain an absolute path, not just bare "engram"
+			t.Fatalf("expected absolute path in windows codex block, got:\n%s", block)
+		}
+		if !strings.Contains(block, "[mcp_servers.engram]") {
+			t.Fatalf("expected mcp_servers.engram header, got:\n%s", block)
+		}
+		if !strings.Contains(block, `args = ["mcp", "--tools=agent"]`) {
+			t.Fatalf("expected args in codex block, got:\n%s", block)
+		}
+	})
+
+	t.Run("unix uses bare name in codex block", func(t *testing.T) {
+		resetSetupSeams(t)
+		runtimeGOOS = "linux"
+
+		block := codexEngramBlockStr()
+		if !strings.Contains(block, `command = "engram"`) {
+			t.Fatalf("expected bare engram in unix codex block, got:\n%s", block)
 		}
 	})
 }
@@ -1078,8 +1384,10 @@ func TestInstallRoutesForOpenCodeAndClaude(t *testing.T) {
 
 	t.Run("claude-code route", func(t *testing.T) {
 		resetSetupSeams(t)
+		useTestHome(t)
 		lookPathFn = func(string) (string, error) { return "claude", nil }
 		runCommand = func(string, ...string) ([]byte, error) { return []byte("ok"), nil }
+		writeClaudeCodeUserMCPFn = func() error { return nil }
 
 		result, err := Install("claude-code")
 		if err != nil {
@@ -1178,7 +1486,6 @@ func TestAdditionalHelperBranches(t *testing.T) {
 			t.Fatalf("expected compact prompt write error, got %v", err)
 		}
 	})
-
 
 	t.Run("injectGeminiMCP read error", func(t *testing.T) {
 		configPath := filepath.Join(t.TempDir(), "settings.json")
