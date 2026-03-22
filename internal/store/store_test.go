@@ -261,6 +261,176 @@ func TestDeleteEmptySessionsNoEmpty(t *testing.T) {
 	}
 }
 
+// ─── GetEmptySessionsStats ───────────────────────────────────────────────────
+
+func TestGetEmptySessionsStatsNoEmpty(t *testing.T) {
+	s := newTestStore(t)
+
+	// Create only non-empty sessions
+	if err := s.CreateSession("s1", "engram", "/tmp"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.AddObservation(AddObservationParams{
+		SessionID: "s1", Type: "note", Title: "t", Content: "c", Project: "engram", Scope: "project",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	stats, err := s.GetEmptySessionsStats("")
+	if err != nil {
+		t.Fatalf("GetEmptySessionsStats: %v", err)
+	}
+	if stats != nil {
+		t.Fatal("expected nil stats when no empty sessions exist")
+	}
+}
+
+func TestGetEmptySessionsStatsMixed(t *testing.T) {
+	s := newTestStore(t)
+
+	// Create sessions with specific dates for deterministic testing
+	if err := s.CreateSession("s-nonempty", "engram", "/tmp"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.AddObservation(AddObservationParams{
+		SessionID: "s-nonempty", Type: "note", Title: "t", Content: "c", Project: "engram", Scope: "project",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Create empty sessions across projects with known dates
+	if err := s.CreateSession("s-empty-eng1", "engram", "/tmp"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.db.Exec(`UPDATE sessions SET started_at = '2024-06-15 10:00:00' WHERE id = 's-empty-eng1'`); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := s.CreateSession("s-empty-eng2", "engram", "/tmp"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.db.Exec(`UPDATE sessions SET started_at = '2025-01-20 14:30:00' WHERE id = 's-empty-eng2'`); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := s.CreateSession("s-empty-osint", "osint", "/tmp"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.db.Exec(`UPDATE sessions SET started_at = '2026-03-21 08:00:00' WHERE id = 's-empty-osint'`); err != nil {
+		t.Fatal(err)
+	}
+
+	// Also create a non-empty session for osint
+	if err := s.CreateSession("s-nonempty-osint", "osint", "/tmp"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.EndSession("s-nonempty-osint", "summary text"); err != nil {
+		t.Fatal(err)
+	}
+
+	// Test all-projects scope
+	stats, err := s.GetEmptySessionsStats("")
+	if err != nil {
+		t.Fatalf("GetEmptySessionsStats: %v", err)
+	}
+	if stats == nil {
+		t.Fatal("expected non-nil stats")
+	}
+	if stats.EmptyCount != 3 {
+		t.Fatalf("expected 3 empty, got %d", stats.EmptyCount)
+	}
+	if stats.TotalCount != 5 {
+		t.Fatalf("expected 5 total, got %d", stats.TotalCount)
+	}
+	if stats.OldestDate != "2024-06-15" {
+		t.Fatalf("expected oldest 2024-06-15, got %q", stats.OldestDate)
+	}
+	if stats.NewestDate != "2026-03-21" {
+		t.Fatalf("expected newest 2026-03-21, got %q", stats.NewestDate)
+	}
+	// Project breakdown should be ordered by count desc
+	if len(stats.ProjectBreakdown) != 2 {
+		t.Fatalf("expected 2 projects in breakdown, got %d", len(stats.ProjectBreakdown))
+	}
+	if stats.ProjectBreakdown[0].Project != "engram" || stats.ProjectBreakdown[0].Count != 2 {
+		t.Fatalf("expected engram:2 first, got %s:%d", stats.ProjectBreakdown[0].Project, stats.ProjectBreakdown[0].Count)
+	}
+	if stats.ProjectBreakdown[1].Project != "osint" || stats.ProjectBreakdown[1].Count != 1 {
+		t.Fatalf("expected osint:1 second, got %s:%d", stats.ProjectBreakdown[1].Project, stats.ProjectBreakdown[1].Count)
+	}
+}
+
+func TestGetEmptySessionsStatsScopedToProject(t *testing.T) {
+	s := newTestStore(t)
+
+	// Create empty sessions in two projects
+	if err := s.CreateSession("s-eng", "engram", "/tmp"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.CreateSession("s-other", "other", "/tmp"); err != nil {
+		t.Fatal(err)
+	}
+	// Non-empty session in engram
+	if err := s.CreateSession("s-nonempty", "engram", "/tmp"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.AddObservation(AddObservationParams{
+		SessionID: "s-nonempty", Type: "note", Title: "t", Content: "c", Project: "engram", Scope: "project",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	stats, err := s.GetEmptySessionsStats("engram")
+	if err != nil {
+		t.Fatalf("GetEmptySessionsStats: %v", err)
+	}
+	if stats == nil {
+		t.Fatal("expected non-nil stats for engram")
+	}
+	if stats.EmptyCount != 1 {
+		t.Fatalf("expected 1 empty for engram, got %d", stats.EmptyCount)
+	}
+	if stats.TotalCount != 2 {
+		t.Fatalf("expected 2 total for engram, got %d", stats.TotalCount)
+	}
+	// Scoped query should NOT include project breakdown
+	if len(stats.ProjectBreakdown) != 0 {
+		t.Fatalf("scoped query should not include breakdown, got %d entries", len(stats.ProjectBreakdown))
+	}
+}
+
+func TestGetEmptySessionsStatsSameDate(t *testing.T) {
+	s := newTestStore(t)
+
+	if err := s.CreateSession("s1", "engram", "/tmp"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.db.Exec(`UPDATE sessions SET started_at = '2026-01-15 10:00:00' WHERE id = 's1'`); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.CreateSession("s2", "engram", "/tmp"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.db.Exec(`UPDATE sessions SET started_at = '2026-01-15 14:30:00' WHERE id = 's2'`); err != nil {
+		t.Fatal(err)
+	}
+
+	stats, err := s.GetEmptySessionsStats("")
+	if err != nil {
+		t.Fatalf("GetEmptySessionsStats: %v", err)
+	}
+	if stats == nil {
+		t.Fatal("expected non-nil stats")
+	}
+	// Both sessions are on the same date
+	if stats.OldestDate != "2026-01-15" {
+		t.Fatalf("expected oldest 2026-01-15, got %q", stats.OldestDate)
+	}
+	if stats.NewestDate != "2026-01-15" {
+		t.Fatalf("expected newest 2026-01-15, got %q", stats.NewestDate)
+	}
+}
+
 func newTestStore(t *testing.T) *Store {
 	t.Helper()
 	cfg := mustDefaultConfig(t)

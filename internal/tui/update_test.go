@@ -2,6 +2,7 @@ package tui
 
 import (
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/Gentleman-Programming/engram/internal/setup"
@@ -1601,6 +1602,13 @@ func TestClearEmptySessionsKeyActivatesConfirm(t *testing.T) {
 	if updated.ConfirmTarget != "" {
 		t.Fatal("sessions screen should target all projects (empty string)")
 	}
+	// Verify rich detail format
+	if !strings.Contains(updated.ConfirmDetail, "will be removed") {
+		t.Fatalf("detail should contain 'will be removed', got %q", updated.ConfirmDetail)
+	}
+	if !strings.Contains(updated.ConfirmDetail, "sessions") {
+		t.Fatalf("detail should contain 'sessions', got %q", updated.ConfirmDetail)
+	}
 }
 
 func TestClearEmptySessionsNoEmptyShowsMessage(t *testing.T) {
@@ -1751,5 +1759,133 @@ func TestExecuteConfirmActionDeleteEmptySessions(t *testing.T) {
 	_, cmd := m.executeConfirmAction()
 	if cmd == nil {
 		t.Fatal("executeConfirmAction for ConfirmDeleteEmptySessions should return a command")
+	}
+}
+
+// ─── buildEmptySessionsDetail ────────────────────────────────────────────────
+
+func TestBuildEmptySessionsDetailAllProjects(t *testing.T) {
+	stats := &store.EmptySessionsStats{
+		EmptyCount: 158,
+		TotalCount: 312,
+		ProjectBreakdown: []store.ProjectEmptyCount{
+			{Project: "opencode", Count: 45},
+			{Project: "engram", Count: 30},
+			{Project: "osint", Count: 25},
+			{Project: "tools", Count: 20},
+			{Project: "misc", Count: 38},
+		},
+		OldestDate: "2024-06-15",
+		NewestDate: "2026-03-21",
+	}
+
+	detail := buildEmptySessionsDetail(stats, "")
+	lines := strings.Split(detail, "\n")
+
+	if len(lines) != 3 {
+		t.Fatalf("expected 3 lines, got %d: %q", len(lines), detail)
+	}
+
+	// Line 1: count and percentage
+	if !strings.Contains(lines[0], "158 of 312 sessions") {
+		t.Fatalf("line 1 should contain counts, got %q", lines[0])
+	}
+	if !strings.Contains(lines[0], "50%") {
+		t.Fatalf("line 1 should contain percentage, got %q", lines[0])
+	}
+	if !strings.Contains(lines[0], "will be removed") {
+		t.Fatalf("line 1 should contain 'will be removed', got %q", lines[0])
+	}
+
+	// Line 2: top 3 projects + "+N more"
+	if !strings.Contains(lines[1], "opencode: 45") {
+		t.Fatalf("line 2 should contain top project, got %q", lines[1])
+	}
+	if !strings.Contains(lines[1], " · ") {
+		t.Fatalf("line 2 should use middle dot separator, got %q", lines[1])
+	}
+	if !strings.Contains(lines[1], "+2 more") {
+		t.Fatalf("line 2 should show remaining count, got %q", lines[1])
+	}
+
+	// Line 3: date range
+	if !strings.Contains(lines[2], "From 2024-06-15 to 2026-03-21") {
+		t.Fatalf("line 3 should contain date range, got %q", lines[2])
+	}
+}
+
+func TestBuildEmptySessionsDetailSingleProject(t *testing.T) {
+	stats := &store.EmptySessionsStats{
+		EmptyCount: 45,
+		TotalCount: 60,
+		OldestDate: "2024-08-01",
+		NewestDate: "2026-03-20",
+	}
+
+	detail := buildEmptySessionsDetail(stats, "engram")
+	lines := strings.Split(detail, "\n")
+
+	// Single project: 2 lines (no breakdown)
+	if len(lines) != 2 {
+		t.Fatalf("expected 2 lines for single project, got %d: %q", len(lines), detail)
+	}
+
+	if !strings.Contains(lines[0], "45 of 60 sessions (75%)") {
+		t.Fatalf("line 1 wrong, got %q", lines[0])
+	}
+	if !strings.Contains(lines[1], "From 2024-08-01 to 2026-03-20") {
+		t.Fatalf("line 2 wrong, got %q", lines[1])
+	}
+}
+
+func TestBuildEmptySessionsDetailSameDate(t *testing.T) {
+	stats := &store.EmptySessionsStats{
+		EmptyCount: 5,
+		TotalCount: 10,
+		OldestDate: "2026-03-21",
+		NewestDate: "2026-03-21",
+	}
+
+	detail := buildEmptySessionsDetail(stats, "engram")
+	lines := strings.Split(detail, "\n")
+
+	if len(lines) != 2 {
+		t.Fatalf("expected 2 lines, got %d: %q", len(lines), detail)
+	}
+
+	// Same date: should show single date, not range
+	if !strings.Contains(lines[1], "From 2026-03-21") {
+		t.Fatalf("line 2 should show single date, got %q", lines[1])
+	}
+	if strings.Contains(lines[1], " to ") {
+		t.Fatalf("line 2 should NOT show range when dates are equal, got %q", lines[1])
+	}
+}
+
+func TestBuildEmptySessionsDetailFewProjects(t *testing.T) {
+	stats := &store.EmptySessionsStats{
+		EmptyCount: 10,
+		TotalCount: 20,
+		ProjectBreakdown: []store.ProjectEmptyCount{
+			{Project: "engram", Count: 7},
+			{Project: "osint", Count: 3},
+		},
+		OldestDate: "2025-01-01",
+		NewestDate: "2025-12-31",
+	}
+
+	detail := buildEmptySessionsDetail(stats, "")
+	lines := strings.Split(detail, "\n")
+
+	if len(lines) != 3 {
+		t.Fatalf("expected 3 lines, got %d: %q", len(lines), detail)
+	}
+
+	// Only 2 projects: no "+N more"
+	if strings.Contains(lines[1], "+") {
+		t.Fatalf("line 2 should not have '+N more' with only 2 projects, got %q", lines[1])
+	}
+	if !strings.Contains(lines[1], "engram: 7 · osint: 3") {
+		t.Fatalf("line 2 should list both projects, got %q", lines[1])
 	}
 }
