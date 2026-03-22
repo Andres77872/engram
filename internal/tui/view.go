@@ -981,19 +981,19 @@ func truncateStr(s string, max int) string {
 }
 
 func (m Model) renderConfirmDialog() string {
-	var b strings.Builder
+	var inner strings.Builder
 
-	b.WriteString(confirmBoxStyle.Render(""))
-	b.WriteString("\n")
-	b.WriteString(confirmWarningStyle.Render("  ⚠ " + m.ConfirmMsg))
-	b.WriteString("\n")
+	inner.WriteString(confirmWarningStyle.Render("⚠ " + m.ConfirmMsg))
+	inner.WriteString("\n")
 
 	if m.ConfirmDetail != "" {
-		b.WriteString(detailContentStyle.Render("  " + m.ConfirmDetail))
-		b.WriteString("\n")
+		for _, line := range strings.Split(m.ConfirmDetail, "\n") {
+			inner.WriteString(detailContentStyle.Render(line))
+			inner.WriteString("\n")
+		}
 	}
 
-	b.WriteString(helpStyle.Render("\n  [y] Confirm  [n/esc] Cancel"))
+	inner.WriteString(helpStyle.Render("\n[y] Confirm  [n/esc] Cancel"))
 
-	return b.String()
+	return confirmBoxStyle.Render(inner.String())
 }

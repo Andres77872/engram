@@ -2,10 +2,13 @@ package tui
 
 import (
 	"fmt"
+	"strings"
 
-	"github.com/Gentleman-Programming/engram/internal/setup"
 	"github.com/charmbracelet/bubbles/spinner"
 	tea "github.com/charmbracelet/bubbletea"
+
+	"github.com/Gentleman-Programming/engram/internal/setup"
+	"github.com/Gentleman-Programming/engram/internal/store"
 )
 
 // ─── Update ──────────────────────────────────────────────────────────────────
@@ -725,19 +728,19 @@ func (m Model) handleSessionsKeys(key string) (tea.Model, tea.Cmd) {
 		if m.FilterActive || m.FilterQuery != "" {
 			return m, nil // Block destructive keys when filter is active
 		}
-		emptyCount, err := m.store.CountEmptySessions("")
+		stats, err := m.store.GetEmptySessionsStats("")
 		if err != nil {
 			m.ErrorMsg = fmt.Sprintf("Failed to count empty sessions: %v", err)
 			return m, nil
 		}
-		if emptyCount == 0 {
+		if stats == nil {
 			m.SuccessMsg = "No empty sessions to clear"
 			return m, clearSuccessAfterDelay()
 		}
 		m.ConfirmActive = true
 		m.ConfirmAction = ConfirmDeleteEmptySessions
 		m.ConfirmMsg = "Clear all empty sessions?"
-		m.ConfirmDetail = fmt.Sprintf("%d sessions with no observations, no prompts, no summary", emptyCount)
+		m.ConfirmDetail = buildEmptySessionsDetail(stats, "")
 		m.ConfirmTarget = "" // all projects
 		return m, nil
 	case "esc":
@@ -906,19 +909,19 @@ func (m Model) handleProjectsKeys(key string) (tea.Model, tea.Cmd) {
 		}
 		if len(m.Projects) > 0 && m.Cursor < len(m.Projects) {
 			proj := m.Projects[m.Cursor]
-			emptyCount, err := m.store.CountEmptySessions(proj.Name)
+			stats, err := m.store.GetEmptySessionsStats(proj.Name)
 			if err != nil {
 				m.ErrorMsg = fmt.Sprintf("Failed to count empty sessions: %v", err)
 				return m, nil
 			}
-			if emptyCount == 0 {
+			if stats == nil {
 				m.SuccessMsg = fmt.Sprintf("No empty sessions in %s", proj.Name)
 				return m, clearSuccessAfterDelay()
 			}
 			m.ConfirmActive = true
 			m.ConfirmAction = ConfirmDeleteEmptySessions
 			m.ConfirmMsg = fmt.Sprintf("Clear empty sessions for %s?", proj.Name)
-			m.ConfirmDetail = fmt.Sprintf("%d sessions with no observations, no prompts, no summary", emptyCount)
+			m.ConfirmDetail = buildEmptySessionsDetail(stats, proj.Name)
 			m.ConfirmTarget = proj.Name
 			return m, nil
 		}
@@ -1011,19 +1014,19 @@ func (m Model) handleProjectDetailKeys(key string) (tea.Model, tea.Cmd) {
 		}
 		if m.SelectedProjectIdx < len(m.Projects) {
 			proj := m.Projects[m.SelectedProjectIdx]
-			emptyCount, err := m.store.CountEmptySessions(proj.Name)
+			stats, err := m.store.GetEmptySessionsStats(proj.Name)
 			if err != nil {
 				m.ErrorMsg = fmt.Sprintf("Failed to count empty sessions: %v", err)
 				return m, nil
 			}
-			if emptyCount == 0 {
+			if stats == nil {
 				m.SuccessMsg = fmt.Sprintf("No empty sessions in %s", proj.Name)
 				return m, clearSuccessAfterDelay()
 			}
 			m.ConfirmActive = true
 			m.ConfirmAction = ConfirmDeleteEmptySessions
 			m.ConfirmMsg = fmt.Sprintf("Clear empty sessions for %s?", proj.Name)
-			m.ConfirmDetail = fmt.Sprintf("%d sessions with no observations, no prompts, no summary", emptyCount)
+			m.ConfirmDetail = buildEmptySessionsDetail(stats, proj.Name)
 			m.ConfirmTarget = proj.Name
 			return m, nil
 		}
@@ -1138,4 +1141,47 @@ func (m Model) refreshScreen(screen Screen) tea.Cmd {
 	default:
 		return nil
 	}
+}
+
+// buildEmptySessionsDetail builds the multi-line ConfirmDetail string from EmptySessionsStats.
+// For all-projects scope (project == ""), includes project breakdown.
+// For single-project scope, omits the breakdown line.
+func buildEmptySessionsDetail(stats *store.EmptySessionsStats, project string) string {
+	var lines []string
+
+	// Line 1: "{empty} of {total} sessions ({pct}%) will be removed"
+	pct := 0
+	if stats.TotalCount > 0 {
+		pct = stats.EmptyCount * 100 / stats.TotalCount
+	}
+	lines = append(lines, fmt.Sprintf("%d of %d sessions (%d%%) will be removed",
+		stats.EmptyCount, stats.TotalCount, pct))
+
+	// Line 2 (all-projects only): top 3 projects with "+N more"
+	if project == "" && len(stats.ProjectBreakdown) > 0 {
+		var parts []string
+		shown := 3
+		if len(stats.ProjectBreakdown) < shown {
+			shown = len(stats.ProjectBreakdown)
+		}
+		for _, pc := range stats.ProjectBreakdown[:shown] {
+			parts = append(parts, fmt.Sprintf("%s: %d", pc.Project, pc.Count))
+		}
+		line := strings.Join(parts, " · ")
+		if remaining := len(stats.ProjectBreakdown) - shown; remaining > 0 {
+			line += fmt.Sprintf(" · +%d more", remaining)
+		}
+		lines = append(lines, line)
+	}
+
+	// Line 3: date range
+	if stats.OldestDate != "" {
+		if stats.OldestDate == stats.NewestDate {
+			lines = append(lines, fmt.Sprintf("From %s", stats.OldestDate))
+		} else {
+			lines = append(lines, fmt.Sprintf("From %s to %s", stats.OldestDate, stats.NewestDate))
+		}
+	}
+
+	return strings.Join(lines, "\n")
 }

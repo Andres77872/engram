@@ -1577,6 +1577,118 @@ func (s *Store) ClearProjectSessions(project string) (*DeleteResult, error) {
 	return result, nil
 }
 
+// ─── Empty Sessions Stats ────────────────────────────────────────────────────
+
+// ProjectEmptyCount holds the empty-session count for a single project.
+type ProjectEmptyCount struct {
+	Project string `json:"project"`
+	Count   int    `json:"count"`
+}
+
+// EmptySessionsStats provides rich statistics about empty sessions for confirmation UX.
+type EmptySessionsStats struct {
+	EmptyCount       int                 `json:"empty_count"`
+	TotalCount       int                 `json:"total_count"`
+	ProjectBreakdown []ProjectEmptyCount `json:"project_breakdown,omitempty"` // top projects by empty count (all-projects scope only)
+	OldestDate       string              `json:"oldest_date,omitempty"`       // oldest empty session started_at (date only)
+	NewestDate       string              `json:"newest_date,omitempty"`       // newest empty session started_at (date only)
+}
+
+// GetEmptySessionsStats returns rich statistics about empty sessions for confirmation UX.
+// If project is non-empty, results are scoped to that project.
+// Returns nil (not error) if there are no empty sessions.
+func (s *Store) GetEmptySessionsStats(project string) (*EmptySessionsStats, error) {
+	// Base condition for "empty" sessions: no summary, no observations, no prompts
+	const emptyCond = `
+		(s.summary IS NULL OR s.summary = '')
+		AND (SELECT COUNT(*) FROM observations o WHERE o.session_id = s.id AND o.deleted_at IS NULL) = 0
+		AND (SELECT COUNT(*) FROM user_prompts p WHERE p.session_id = s.id) = 0
+	`
+
+	// Build project filter
+	projectFilter := ""
+	args := []any{}
+	if project != "" {
+		projectFilter = " AND s.project = ?"
+		args = append(args, project)
+	}
+
+	// Single query: empty count, total count, date range
+	statsQuery := `
+		SELECT
+			(SELECT COUNT(*) FROM sessions s WHERE ` + emptyCond + projectFilter + `) AS empty_count,
+			(SELECT COUNT(*) FROM sessions s WHERE 1=1` + projectFilter + `) AS total_count,
+			(SELECT MIN(s.started_at) FROM sessions s WHERE ` + emptyCond + projectFilter + `) AS oldest_date,
+			(SELECT MAX(s.started_at) FROM sessions s WHERE ` + emptyCond + projectFilter + `) AS newest_date
+	`
+
+	// Each subquery needs its own copy of args
+	fullArgs := make([]any, 0, len(args)*4)
+	for i := 0; i < 4; i++ {
+		fullArgs = append(fullArgs, args...)
+	}
+
+	var stats EmptySessionsStats
+	var oldestRaw, newestRaw sql.NullString
+	if err := s.db.QueryRow(statsQuery, fullArgs...).Scan(
+		&stats.EmptyCount,
+		&stats.TotalCount,
+		&oldestRaw,
+		&newestRaw,
+	); err != nil {
+		return nil, err
+	}
+
+	if stats.EmptyCount == 0 {
+		return nil, nil
+	}
+
+	// Parse dates to date-only format (YYYY-MM-DD)
+	if oldestRaw.Valid {
+		stats.OldestDate = parseDateOnly(oldestRaw.String)
+	}
+	if newestRaw.Valid {
+		stats.NewestDate = parseDateOnly(newestRaw.String)
+	}
+
+	// Project breakdown — only for all-projects scope
+	if project == "" {
+		breakdownQuery := `
+			SELECT s.project, COUNT(*) AS cnt
+			FROM sessions s
+			WHERE ` + emptyCond + `
+			GROUP BY s.project
+			ORDER BY cnt DESC
+		`
+		rows, err := s.db.Query(breakdownQuery)
+		if err != nil {
+			return nil, err
+		}
+		defer rows.Close()
+
+		for rows.Next() {
+			var pc ProjectEmptyCount
+			if err := rows.Scan(&pc.Project, &pc.Count); err != nil {
+				return nil, err
+			}
+			stats.ProjectBreakdown = append(stats.ProjectBreakdown, pc)
+		}
+		if err := rows.Err(); err != nil {
+			return nil, err
+		}
+	}
+
+	return &stats, nil
+}
+
+// parseDateOnly extracts the date portion (YYYY-MM-DD) from a datetime string.
+func parseDateOnly(datetime string) string {
+	if len(datetime) >= 10 {
+		return datetime[:10]
+	}
+	return datetime
+}
+
 // CountEmptySessions returns the number of sessions with zero observations, zero prompts, and no summary.
 // If project is non-empty, it scopes the count to that project.
 func (s *Store) CountEmptySessions(project string) (int, error) {
