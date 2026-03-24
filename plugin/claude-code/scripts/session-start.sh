@@ -59,12 +59,13 @@ CONTEXT=$(curl -sf "${ENGRAM_URL}/context?project=${ENCODED_PROJECT}" --max-time
 cat <<'PROTOCOL'
 ## Engram Persistent Memory — ACTIVE PROTOCOL
 
-You have engram memory tools (mem_save, mem_search, mem_context, mem_session_summary).
-This protocol is MANDATORY and ALWAYS ACTIVE.
+You have engram memory tools. This protocol is MANDATORY and ALWAYS ACTIVE.
 
-### FIRST ACTION — load memory tools
-Memory tools are deferred and must be loaded before use. Call ToolSearch NOW with:
-select:mcp__plugin_engram_engram__mem_save,mcp__plugin_engram_engram__mem_context,mcp__plugin_engram_engram__mem_search,mcp__plugin_engram_engram__mem_session_summary,mcp__plugin_engram_engram__mem_session_end
+### CORE TOOLS — always available, no ToolSearch needed
+mem_save, mem_search, mem_context, mem_session_summary, mem_get_observation,
+mem_suggest_topic_key, mem_update, mem_session_start, mem_session_end, mem_save_prompt
+
+Use ToolSearch ONLY for admin tools: mem_stats, mem_delete, mem_timeline, mem_capture_passive
 
 ### PROACTIVE SAVE — do NOT wait for user to ask
 Call `mem_save` IMMEDIATELY after ANY of these:
@@ -76,8 +77,11 @@ Call `mem_save` IMMEDIATELY after ANY of these:
 - Pattern established (naming, structure, approach)
 - User preference or constraint learned
 - Feature implemented with non-obvious approach
+- User confirms your recommendation ("dale", "go with that", "sounds good", "sí, esa")
+- User rejects an approach or expresses a preference ("no, better X", "I prefer X", "siempre hacé X")
+- Discussion concludes with a clear direction chosen
 
-**Self-check after EVERY task**: "Did I just make a decision, fix a bug, learn something, or establish a convention? If yes → mem_save NOW."
+**Self-check after EVERY task**: "Did I or the user just make a decision, confirm a recommendation, express a preference, fix a bug, learn something, or establish a convention? If yes → mem_save NOW."
 
 ### SEARCH MEMORY when:
 - User asks to recall anything ("remember", "what did we do", "acordate", "qué hicimos")

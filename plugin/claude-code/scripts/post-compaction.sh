@@ -35,8 +35,13 @@ CONTEXT=$(curl -sf "${ENGRAM_URL}/context?project=${ENCODED_PROJECT}" --max-time
 cat <<'PROTOCOL'
 ## Engram Persistent Memory — ACTIVE PROTOCOL
 
-You have engram memory tools (mem_save, mem_search, mem_context, mem_session_summary).
-This protocol is MANDATORY and ALWAYS ACTIVE.
+You have engram memory tools. This protocol is MANDATORY and ALWAYS ACTIVE.
+
+### CORE TOOLS — always available, no ToolSearch needed
+mem_save, mem_search, mem_context, mem_session_summary, mem_get_observation,
+mem_suggest_topic_key, mem_update, mem_session_start, mem_session_end, mem_save_prompt
+
+Use ToolSearch ONLY for admin tools: mem_stats, mem_delete, mem_timeline, mem_capture_passive
 
 ### PROACTIVE SAVE — do NOT wait for user to ask
 Call `mem_save` IMMEDIATELY after ANY of these:

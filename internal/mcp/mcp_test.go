@@ -82,7 +82,6 @@ func TestHandleSuggestTopicKeyRequiresInput(t *testing.T) {
 	}
 }
 
-
 func TestHandleSaveSuggestsTopicKeyWhenMissing(t *testing.T) {
 	s := newMCPTestStore(t)
 	h := handleSave(s)
@@ -1252,7 +1251,11 @@ func TestCoreToolsAreNotDeferred(t *testing.T) {
 	srv := NewServer(s)
 	tools := srv.ListTools()
 
-	coreTools := []string{"mem_save", "mem_search", "mem_context", "mem_session_summary"}
+	coreTools := []string{
+		"mem_save", "mem_search", "mem_context", "mem_session_summary",
+		"mem_update", "mem_suggest_topic_key", "mem_save_prompt",
+		"mem_get_observation", "mem_session_start", "mem_session_end",
+	}
 	for _, name := range coreTools {
 		tool := tools[name]
 		if tool == nil {
@@ -1271,9 +1274,7 @@ func TestNonCoreToolsAreDeferred(t *testing.T) {
 	tools := srv.ListTools()
 
 	deferredTools := []string{
-		"mem_update", "mem_suggest_topic_key", "mem_delete",
-		"mem_save_prompt", "mem_stats", "mem_timeline",
-		"mem_get_observation", "mem_session_start", "mem_session_end",
+		"mem_stats", "mem_delete", "mem_timeline",
 		"mem_capture_passive",
 	}
 	for _, name := range deferredTools {
