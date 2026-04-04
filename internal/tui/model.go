@@ -157,9 +157,8 @@ type Model struct {
 	UpdateMsg    string
 
 	// Status messages
-	ErrorMsg   string
-	SuccessMsg string
-
+	ErrorMsg      string
+	SuccessMsg    string
 	ConfirmActive bool
 	ConfirmAction ConfirmAction
 	ConfirmMsg    string

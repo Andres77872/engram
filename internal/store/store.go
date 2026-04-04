@@ -77,11 +77,12 @@ type Stats struct {
 }
 
 type ProjectStats struct {
-	Name             string `json:"name"`
-	SessionCount     int    `json:"session_count"`
-	ObservationCount int    `json:"observation_count"`
-	PromptCount      int    `json:"prompt_count"`
-	LastActivityAt   string `json:"last_activity_at"`
+	Name             string   `json:"name"`
+	SessionCount     int      `json:"session_count"`
+	ObservationCount int      `json:"observation_count"`
+	PromptCount      int      `json:"prompt_count"`
+	LastActivityAt   string   `json:"last_activity_at"`
+	Directories      []string `json:"directories"`
 }
 
 type TimelineEntry struct {
@@ -2979,15 +2980,6 @@ func (s *Store) ListProjectNames() ([]string, error) {
 		results = append(results, name)
 	}
 	return results, rows.Err()
-}
-
-// ProjectStats holds aggregate statistics for a single project.
-type ProjectStats struct {
-	Name             string   `json:"name"`
-	ObservationCount int      `json:"observation_count"`
-	SessionCount     int      `json:"session_count"`
-	PromptCount      int      `json:"prompt_count"`
-	Directories      []string `json:"directories"` // unique directories from sessions
 }
 
 // ListProjectsWithStats returns all projects with aggregated counts.
