@@ -197,7 +197,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.Scroll = 0
 		m.ProjectDetailScroll = 0
 		m.resetFilter()
-		return m, tea.Batch(m.reloadCurrentScreen(), loadStats(m.store), clearSuccessAfterDelay())
+		// Guard: if on ProjectDetail with stale SelectedProjectIdx, navigate back to Projects
+		if m.Screen == ScreenProjectDetail && m.SelectedProjectIdx >= len(m.Projects) {
+			m.Screen = ScreenProjects
+			m.SelectedProjectIdx = 0
+		}
+		// Always reload projects and stats after deletion to keep counts aligned
+		return m, tea.Batch(m.reloadCurrentScreen(), loadProjects(m.store), loadStats(m.store), clearSuccessAfterDelay())
 
 	case projectsLoadedMsg:
 		if msg.err != nil {
@@ -734,7 +740,7 @@ func (m Model) handleSessionsKeys(key string) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		if stats == nil {
-			m.SuccessMsg = "No empty sessions to clear"
+			m.SuccessMsg = "No empty sessions (empty = no summary, observations, or prompts)"
 			return m, clearSuccessAfterDelay()
 		}
 		m.ConfirmActive = true
@@ -1182,6 +1188,9 @@ func buildEmptySessionsDetail(stats *store.EmptySessionsStats, project string) s
 			lines = append(lines, fmt.Sprintf("From %s to %s", stats.OldestDate, stats.NewestDate))
 		}
 	}
+
+	// Line 4: definition of "empty"
+	lines = append(lines, "(Empty = no summary, no observations, no prompts)")
 
 	return strings.Join(lines, "\n")
 }

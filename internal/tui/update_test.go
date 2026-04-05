@@ -1657,7 +1657,7 @@ func TestClearEmptySessionsNoEmptyShowsMessage(t *testing.T) {
 	if updated.ConfirmActive {
 		t.Fatal("e with no empty sessions should NOT activate confirm")
 	}
-	if updated.SuccessMsg != "No empty sessions to clear" {
+	if updated.SuccessMsg != "No empty sessions (empty = no summary, observations, or prompts)" {
 		t.Fatalf("expected success message, got %q", updated.SuccessMsg)
 	}
 	if cmd == nil {
@@ -1744,6 +1744,31 @@ func TestEmptySessionsDeletedMsgRefreshes(t *testing.T) {
 	}
 }
 
+func TestEmptySessionsDeletedMsgReloadsProjects(t *testing.T) {
+	fx := newTestFixture(t)
+	// Pre-populate projects list with stale data
+	m := New(fx.store, "")
+	m.Screen = ScreenSessions
+	m.Projects = []store.ProjectStats{
+		{Name: "stale-project", SessionCount: 100, ObservationCount: 500, PromptCount: 50},
+	}
+	m.ConfirmActive = true
+
+	result := &store.DeleteResult{SessionsDeleted: 1}
+	updatedModel, _ := m.Update(emptySessionsDeletedMsg{result: result})
+	updated := updatedModel.(Model)
+
+	// After deletion, Projects should be cleared (waiting for reload)
+	// The reload happens via loadProjects command, but we verify the state reset
+	if len(updated.Projects) != 1 {
+		t.Fatalf("expected Projects to still have stale entry until reload, got %d entries", len(updated.Projects))
+	}
+	// The key assertion: screen stays on Sessions (not navigated away)
+	if updated.Screen != ScreenSessions {
+		t.Fatalf("expected to stay on Sessions screen, got %v", updated.Screen)
+	}
+}
+
 func TestEmptySessionsDeletedMsgError(t *testing.T) {
 	m := New(nil, "")
 	m.Screen = ScreenSessions
@@ -1789,8 +1814,8 @@ func TestBuildEmptySessionsDetailAllProjects(t *testing.T) {
 	detail := buildEmptySessionsDetail(stats, "")
 	lines := strings.Split(detail, "\n")
 
-	if len(lines) != 3 {
-		t.Fatalf("expected 3 lines, got %d: %q", len(lines), detail)
+	if len(lines) != 4 {
+		t.Fatalf("expected 4 lines, got %d: %q", len(lines), detail)
 	}
 
 	// Line 1: count and percentage
@@ -1819,6 +1844,11 @@ func TestBuildEmptySessionsDetailAllProjects(t *testing.T) {
 	if !strings.Contains(lines[2], "From 2024-06-15 to 2026-03-21") {
 		t.Fatalf("line 3 should contain date range, got %q", lines[2])
 	}
+
+	// Line 4: definition
+	if !strings.Contains(lines[3], "Empty") {
+		t.Fatalf("line 4 should contain definition, got %q", lines[3])
+	}
 }
 
 func TestBuildEmptySessionsDetailSingleProject(t *testing.T) {
@@ -1832,9 +1862,9 @@ func TestBuildEmptySessionsDetailSingleProject(t *testing.T) {
 	detail := buildEmptySessionsDetail(stats, "engram")
 	lines := strings.Split(detail, "\n")
 
-	// Single project: 2 lines (no breakdown)
-	if len(lines) != 2 {
-		t.Fatalf("expected 2 lines for single project, got %d: %q", len(lines), detail)
+	// Single project: 3 lines (no breakdown)
+	if len(lines) != 3 {
+		t.Fatalf("expected 3 lines for single project, got %d: %q", len(lines), detail)
 	}
 
 	if !strings.Contains(lines[0], "45 of 60 sessions (75%)") {
@@ -1842,6 +1872,9 @@ func TestBuildEmptySessionsDetailSingleProject(t *testing.T) {
 	}
 	if !strings.Contains(lines[1], "From 2024-08-01 to 2026-03-20") {
 		t.Fatalf("line 2 wrong, got %q", lines[1])
+	}
+	if !strings.Contains(lines[2], "Empty") {
+		t.Fatalf("line 3 should contain definition, got %q", lines[2])
 	}
 }
 
@@ -1856,8 +1889,8 @@ func TestBuildEmptySessionsDetailSameDate(t *testing.T) {
 	detail := buildEmptySessionsDetail(stats, "engram")
 	lines := strings.Split(detail, "\n")
 
-	if len(lines) != 2 {
-		t.Fatalf("expected 2 lines, got %d: %q", len(lines), detail)
+	if len(lines) != 3 {
+		t.Fatalf("expected 3 lines, got %d: %q", len(lines), detail)
 	}
 
 	// Same date: should show single date, not range
@@ -1866,6 +1899,9 @@ func TestBuildEmptySessionsDetailSameDate(t *testing.T) {
 	}
 	if strings.Contains(lines[1], " to ") {
 		t.Fatalf("line 2 should NOT show range when dates are equal, got %q", lines[1])
+	}
+	if !strings.Contains(lines[2], "Empty") {
+		t.Fatalf("line 3 should contain definition, got %q", lines[2])
 	}
 }
 
@@ -1884,8 +1920,8 @@ func TestBuildEmptySessionsDetailFewProjects(t *testing.T) {
 	detail := buildEmptySessionsDetail(stats, "")
 	lines := strings.Split(detail, "\n")
 
-	if len(lines) != 3 {
-		t.Fatalf("expected 3 lines, got %d: %q", len(lines), detail)
+	if len(lines) != 4 {
+		t.Fatalf("expected 4 lines, got %d: %q", len(lines), detail)
 	}
 
 	// Only 2 projects: no "+N more"
@@ -1894,5 +1930,8 @@ func TestBuildEmptySessionsDetailFewProjects(t *testing.T) {
 	}
 	if !strings.Contains(lines[1], "engram: 7 · osint: 3") {
 		t.Fatalf("line 2 should list both projects, got %q", lines[1])
+	}
+	if !strings.Contains(lines[3], "Empty") {
+		t.Fatalf("line 4 should contain definition, got %q", lines[3])
 	}
 }

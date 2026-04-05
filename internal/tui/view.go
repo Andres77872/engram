@@ -554,12 +554,18 @@ func (m Model) viewSessionDetail() string {
 	b.WriteString(headerStyle.Render(header))
 	b.WriteString("\n")
 
-	// Session metadata
+	// Session metadata: prompt count and summary
+	if sess.PromptCount > 0 {
+		b.WriteString(fmt.Sprintf("  %s %s\n",
+			detailLabelStyle.Render("Prompts:"),
+			statNumberStyle.Render(fmt.Sprintf("%d", sess.PromptCount))))
+	}
 	if sess.Summary != nil {
-		b.WriteString(fmt.Sprintf("  %s %s\n\n",
+		b.WriteString(fmt.Sprintf("  %s %s\n",
 			detailLabelStyle.Render("Summary:"),
 			detailValueStyle.Render(*sess.Summary)))
 	}
+	b.WriteString("\n")
 
 	count := len(m.SessionObservations)
 	b.WriteString(sectionHeadingStyle.Render(fmt.Sprintf("  Observations (%d)", count)))
