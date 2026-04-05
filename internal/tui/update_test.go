@@ -1723,6 +1723,106 @@ func TestClearEmptySessionsProjectsKey(t *testing.T) {
 	_ = updated
 }
 
+func TestClearEmptySessionsProjectsNoEmptyShowsMessage(t *testing.T) {
+	// Create a fresh store with no empty sessions for a specific project
+	cfg, err := store.DefaultConfig()
+	if err != nil {
+		t.Fatalf("DefaultConfig: %v", err)
+	}
+	cfg.DataDir = t.TempDir()
+	s, err := store.New(cfg)
+	if err != nil {
+		t.Fatalf("create store: %v", err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+
+	// Create a session with an observation (not empty)
+	if err := s.CreateSession("non-empty-session", "engram", "/tmp/engram"); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	_, err = s.AddObservation(store.AddObservationParams{
+		SessionID: "non-empty-session",
+		Type:      "bugfix",
+		Title:     "Test observation",
+		Content:   "content",
+		Project:   "engram",
+		Scope:     "project",
+	})
+	if err != nil {
+		t.Fatalf("add observation: %v", err)
+	}
+
+	m := New(s, "")
+	m.Screen = ScreenProjects
+	m.Height = 20
+	m.Projects = []store.ProjectStats{{Name: "engram", SessionCount: 1}}
+	m.Cursor = 0
+
+	updatedModel, cmd := m.handleProjectsKeys("e")
+	updated := updatedModel.(Model)
+
+	if updated.ConfirmActive {
+		t.Fatal("e with no empty sessions should NOT activate confirm in Projects screen")
+	}
+	expectedMsg := "No empty sessions in engram (empty = no summary, observations, or prompts)"
+	if updated.SuccessMsg != expectedMsg {
+		t.Fatalf("expected success message '%s', got %q", expectedMsg, updated.SuccessMsg)
+	}
+	if cmd == nil {
+		t.Fatal("should return clearSuccessAfterDelay command")
+	}
+}
+
+func TestClearEmptySessionsProjectDetailNoEmptyShowsMessage(t *testing.T) {
+	// Create a fresh store with no empty sessions for a specific project
+	cfg, err := store.DefaultConfig()
+	if err != nil {
+		t.Fatalf("DefaultConfig: %v", err)
+	}
+	cfg.DataDir = t.TempDir()
+	s, err := store.New(cfg)
+	if err != nil {
+		t.Fatalf("create store: %v", err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+
+	// Create a session with an observation (not empty)
+	if err := s.CreateSession("non-empty-session", "engram", "/tmp/engram"); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	_, err = s.AddObservation(store.AddObservationParams{
+		SessionID: "non-empty-session",
+		Type:      "bugfix",
+		Title:     "Test observation",
+		Content:   "content",
+		Project:   "engram",
+		Scope:     "project",
+	})
+	if err != nil {
+		t.Fatalf("add observation: %v", err)
+	}
+
+	m := New(s, "")
+	m.Screen = ScreenProjectDetail
+	m.Height = 20
+	m.Projects = []store.ProjectStats{{Name: "engram", SessionCount: 1}}
+	m.SelectedProjectIdx = 0
+
+	updatedModel, cmd := m.handleProjectDetailKeys("e")
+	updated := updatedModel.(Model)
+
+	if updated.ConfirmActive {
+		t.Fatal("e with no empty sessions should NOT activate confirm in ProjectDetail screen")
+	}
+	expectedMsg := "No empty sessions in engram (empty = no summary, observations, or prompts)"
+	if updated.SuccessMsg != expectedMsg {
+		t.Fatalf("expected success message '%s', got %q", expectedMsg, updated.SuccessMsg)
+	}
+	if cmd == nil {
+		t.Fatal("should return clearSuccessAfterDelay command")
+	}
+}
+
 func TestEmptySessionsDeletedMsgRefreshes(t *testing.T) {
 	fx := newTestFixture(t)
 	m := New(fx.store, "")
@@ -1845,9 +1945,10 @@ func TestBuildEmptySessionsDetailAllProjects(t *testing.T) {
 		t.Fatalf("line 3 should contain date range, got %q", lines[2])
 	}
 
-	// Line 4: definition
-	if !strings.Contains(lines[3], "Empty") {
-		t.Fatalf("line 4 should contain definition, got %q", lines[3])
+	// Line 4: definition - must be exact to avoid UX confusion
+	expectedDef := "(Empty = no summary, no observations, no prompts)"
+	if lines[3] != expectedDef {
+		t.Fatalf("line 4 should be exact definition, got %q, want %q", lines[3], expectedDef)
 	}
 }
 
@@ -1873,8 +1974,10 @@ func TestBuildEmptySessionsDetailSingleProject(t *testing.T) {
 	if !strings.Contains(lines[1], "From 2024-08-01 to 2026-03-20") {
 		t.Fatalf("line 2 wrong, got %q", lines[1])
 	}
-	if !strings.Contains(lines[2], "Empty") {
-		t.Fatalf("line 3 should contain definition, got %q", lines[2])
+	// Line 3: definition - must be exact
+	expectedDef := "(Empty = no summary, no observations, no prompts)"
+	if lines[2] != expectedDef {
+		t.Fatalf("line 3 should be exact definition, got %q, want %q", lines[2], expectedDef)
 	}
 }
 
@@ -1900,8 +2003,10 @@ func TestBuildEmptySessionsDetailSameDate(t *testing.T) {
 	if strings.Contains(lines[1], " to ") {
 		t.Fatalf("line 2 should NOT show range when dates are equal, got %q", lines[1])
 	}
-	if !strings.Contains(lines[2], "Empty") {
-		t.Fatalf("line 3 should contain definition, got %q", lines[2])
+	// Line 3: definition - must be exact
+	expectedDef := "(Empty = no summary, no observations, no prompts)"
+	if lines[2] != expectedDef {
+		t.Fatalf("line 3 should be exact definition, got %q, want %q", lines[2], expectedDef)
 	}
 }
 
@@ -1931,7 +2036,9 @@ func TestBuildEmptySessionsDetailFewProjects(t *testing.T) {
 	if !strings.Contains(lines[1], "engram: 7 · osint: 3") {
 		t.Fatalf("line 2 should list both projects, got %q", lines[1])
 	}
-	if !strings.Contains(lines[3], "Empty") {
-		t.Fatalf("line 4 should contain definition, got %q", lines[3])
+	// Line 4: definition - must be exact
+	expectedDef := "(Empty = no summary, no observations, no prompts)"
+	if lines[3] != expectedDef {
+		t.Fatalf("line 4 should be exact definition, got %q, want %q", lines[3], expectedDef)
 	}
 }

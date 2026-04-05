@@ -921,7 +921,7 @@ func (m Model) handleProjectsKeys(key string) (tea.Model, tea.Cmd) {
 				return m, nil
 			}
 			if stats == nil {
-				m.SuccessMsg = fmt.Sprintf("No empty sessions in %s", proj.Name)
+				m.SuccessMsg = fmt.Sprintf("No empty sessions in %s (empty = no summary, observations, or prompts)", proj.Name)
 				return m, clearSuccessAfterDelay()
 			}
 			m.ConfirmActive = true
@@ -1026,7 +1026,7 @@ func (m Model) handleProjectDetailKeys(key string) (tea.Model, tea.Cmd) {
 				return m, nil
 			}
 			if stats == nil {
-				m.SuccessMsg = fmt.Sprintf("No empty sessions in %s", proj.Name)
+				m.SuccessMsg = fmt.Sprintf("No empty sessions in %s (empty = no summary, observations, or prompts)", proj.Name)
 				return m, clearSuccessAfterDelay()
 			}
 			m.ConfirmActive = true

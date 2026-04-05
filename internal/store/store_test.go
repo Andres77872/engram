@@ -261,6 +261,70 @@ func TestDeleteEmptySessionsNoEmpty(t *testing.T) {
 	}
 }
 
+func TestDeleteEmptySessionsPreservesSessionsWithPrompts(t *testing.T) {
+	s := newTestStore(t)
+
+	// Create an empty session (no observations, no summary, no prompts) - should be deleted
+	if err := s.CreateSession("s-empty", "engram", "/tmp"); err != nil {
+		t.Fatal(err)
+	}
+
+	// Create a session with only a prompt (no observations, no summary) - should NOT be deleted
+	if err := s.CreateSession("s-with-prompt", "engram", "/tmp"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.AddPrompt(AddPromptParams{SessionID: "s-with-prompt", Content: "user prompt", Project: "engram"}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Create a session with observations - should NOT be deleted
+	if err := s.CreateSession("s-with-obs", "engram", "/tmp"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.AddObservation(AddObservationParams{
+		SessionID: "s-with-obs",
+		Type:      "note",
+		Title:     "test",
+		Content:   "test",
+		Project:   "engram",
+		Scope:     "project",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := s.DeleteEmptySessions("")
+	if err != nil {
+		t.Fatalf("DeleteEmptySessions: %v", err)
+	}
+	if result.SessionsDeleted != 1 {
+		t.Fatalf("expected 1 session deleted (the empty one), got %d", result.SessionsDeleted)
+	}
+
+	// Verify the remaining sessions
+	all, err := s.AllSessions("", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(all) != 2 {
+		t.Fatalf("expected 2 sessions to remain, got %d", len(all))
+	}
+
+	// Check that the prompt-only session still exists
+	remainingIDs := make(map[string]bool)
+	for _, sess := range all {
+		remainingIDs[sess.ID] = true
+	}
+	if !remainingIDs["s-with-prompt"] {
+		t.Fatal("session with prompt should NOT have been deleted")
+	}
+	if !remainingIDs["s-with-obs"] {
+		t.Fatal("session with observation should NOT have been deleted")
+	}
+	if remainingIDs["s-empty"] {
+		t.Fatal("empty session should have been deleted")
+	}
+}
+
 // ─── GetEmptySessionsStats ───────────────────────────────────────────────────
 
 func TestGetEmptySessionsStatsNoEmpty(t *testing.T) {
