@@ -1,6 +1,7 @@
 package dashboard
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"html"
@@ -26,6 +27,7 @@ type parityStoreStub struct {
 	systemHealth  cloudstore.DashboardSystemHealth
 	syncControls  []cloudstore.ProjectSyncControl
 	distinctTypes []string
+	auditRows     []cloudstore.DashboardAuditRow
 
 	errListProjects           error
 	errProjectDetail          error
@@ -198,6 +200,11 @@ func (s parityStoreStub) GetContributorDetail(name string) (cloudstore.Dashboard
 }
 func (s parityStoreStub) ListDistinctTypes() ([]string, error) {
 	return s.distinctTypes, nil
+}
+
+// ListAuditEntriesPaginated — no-op stub for interface parity (REQ-409).
+func (s parityStoreStub) ListAuditEntriesPaginated(_ context.Context, _ cloudstore.AuditFilter, _, _ int) ([]cloudstore.DashboardAuditRow, int, error) {
+	return s.auditRows, len(s.auditRows), nil
 }
 
 // ─── Batch 6 Tests ───────────────────────────────────────────────────────────
@@ -2843,5 +2850,257 @@ func TestAdminUsersListRequires403ForNonAdmin(t *testing.T) {
 	mux.ServeHTTP(rec, req)
 	if rec.Code != http.StatusForbidden {
 		t.Fatalf("R6-3: expected 403 for non-admin on /dashboard/admin/users/list, got %d body=%q", rec.Code, rec.Body.String())
+	}
+}
+
+// ─── REQ-408, REQ-409, REQ-410, REQ-411: Audit Log UI tests ──────────────────
+
+// TestAdminAuditLogPageHTMXWiring verifies that AdminAuditLogPage renders with
+// the HTMX container that triggers loading the list partial. REQ-408 scenario 1, 2.5.1.
+func TestAdminAuditLogPageHTMXWiring(t *testing.T) {
+	store := parityStoreStub{}
+	mux := newAuthedAdminMux(store)
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/dashboard/admin/audit-log?auth=ok", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d body=%q", rec.Code, rec.Body.String())
+	}
+	body := rec.Body.String()
+	if !strings.Contains(body, `hx-get="/dashboard/admin/audit-log/list"`) {
+		t.Errorf("expected hx-get attr in audit log shell, got body=%q", body)
+	}
+	if !strings.Contains(body, `hx-trigger="load"`) {
+		t.Errorf("expected hx-trigger=load in audit log shell, got body=%q", body)
+	}
+}
+
+// TestAdminAuditLogListPartialRendersFilterInputs verifies that the list partial
+// renders filter inputs and a pagination bar. REQ-409 scenario 1, 2.5.2.
+func TestAdminAuditLogListPartialRendersFilterInputs(t *testing.T) {
+	store := parityStoreStub{
+		auditRows: []cloudstore.DashboardAuditRow{
+			{ID: 1, OccurredAt: "2026-04-24T00:00:00Z", Contributor: "alice", Project: "proj-a",
+				Action: cloudstore.AuditActionMutationPush, Outcome: cloudstore.AuditOutcomeRejectedProjectPaused},
+		},
+	}
+	mux := newAuthedAdminMux(store)
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/dashboard/admin/audit-log/list?auth=ok", nil)
+	req.Header.Set("HX-Request", "true")
+	mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d body=%q", rec.Code, rec.Body.String())
+	}
+	body := rec.Body.String()
+	for _, expected := range []string{
+		"contributor", "project", "outcome", "from", "to", "alice",
+	} {
+		if !strings.Contains(body, expected) {
+			t.Errorf("expected %q in audit log list partial, body=%q", expected, body)
+		}
+	}
+}
+
+// TestAdminAuditLogListPartialOutcomeDropdown verifies that the outcome dropdown
+// contains the exported constant value. REQ-410 scenario 2, 2.5.3.
+func TestAdminAuditLogListPartialOutcomeDropdown(t *testing.T) {
+	store := parityStoreStub{}
+	mux := newAuthedAdminMux(store)
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/dashboard/admin/audit-log/list?auth=ok", nil)
+	req.Header.Set("HX-Request", "true")
+	mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d body=%q", rec.Code, rec.Body.String())
+	}
+	body := rec.Body.String()
+	if !strings.Contains(body, cloudstore.AuditOutcomeRejectedProjectPaused) {
+		t.Errorf("expected outcome constant %q in dropdown, body=%q", cloudstore.AuditOutcomeRejectedProjectPaused, body)
+	}
+}
+
+// TestAdminNavAuditLogLinkInAllFourPages verifies that all four admin page shells
+// contain the "Audit Log" link after the adminNav refactor. REQ-411 all scenarios, 2.5.4.
+func TestAdminNavAuditLogLinkInAllFourPages(t *testing.T) {
+	store := parityStoreStub{}
+	mux := newAuthedAdminMux(store)
+
+	pages := []struct {
+		url  string
+		name string
+	}{
+		{"/dashboard/admin?auth=ok", "AdminPage"},
+		{"/dashboard/admin/projects?auth=ok", "AdminProjectsPage"},
+		{"/dashboard/admin/users?auth=ok", "AdminUsersPage"},
+		{"/dashboard/admin/health?auth=ok", "AdminHealthPage"},
+	}
+
+	for _, page := range pages {
+		t.Run(page.name, func(t *testing.T) {
+			rec := httptest.NewRecorder()
+			mux.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, page.url, nil))
+			if rec.Code != http.StatusOK {
+				t.Fatalf("expected 200 for %s, got %d body=%q", page.name, rec.Code, rec.Body.String())
+			}
+			body := rec.Body.String()
+			if !strings.Contains(body, `href="/dashboard/admin/audit-log"`) {
+				t.Errorf("expected Audit Log link in %s nav, body=%q", page.name, body)
+			}
+			if !strings.Contains(body, "Audit Log") {
+				t.Errorf("expected 'Audit Log' text in %s nav, body=%q", page.name, body)
+			}
+		})
+	}
+}
+
+// ─── Phase 2.6: Handler and route tests ──────────────────────────────────────
+
+// TestAdminAuditLogShellRouteAdminAccess verifies admin can access audit log shell. REQ-408 scenario 1, 2.6.1.
+func TestAdminAuditLogShellRouteAdminAccess(t *testing.T) {
+	mux := newAuthedAdminMux(parityStoreStub{})
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/dashboard/admin/audit-log?auth=ok", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200 for admin audit log, got %d body=%q", rec.Code, rec.Body.String())
+	}
+}
+
+// TestAdminAuditLogShellRouteNonAdminDenied verifies non-admin gets 403. REQ-408 scenario 2, 2.6.2.
+func TestAdminAuditLogShellRouteNonAdminDenied(t *testing.T) {
+	mux := newAuthedMux(parityStoreStub{}, false) // isAdmin=false
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/dashboard/admin/audit-log?auth=ok", nil))
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("expected 403 for non-admin audit log, got %d body=%q", rec.Code, rec.Body.String())
+	}
+}
+
+// TestAdminAuditLogListPartialAdminAccess verifies admin gets 200 with rows. REQ-409 scenario 1, 2.6.3.
+func TestAdminAuditLogListPartialAdminAccess(t *testing.T) {
+	store := parityStoreStub{
+		auditRows: []cloudstore.DashboardAuditRow{
+			{ID: 1, OccurredAt: "2026-04-24T00:00:00Z", Contributor: "alice",
+				Project: "proj-a", Action: "mutation_push", Outcome: "rejected_project_paused"},
+		},
+	}
+	mux := newAuthedAdminMux(store)
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/dashboard/admin/audit-log/list?auth=ok", nil)
+	req.Header.Set("HX-Request", "true")
+	mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200 for admin audit list, got %d body=%q", rec.Code, rec.Body.String())
+	}
+	body := rec.Body.String()
+	if !strings.Contains(body, "alice") {
+		t.Errorf("expected contributor 'alice' in audit list partial, body=%q", body)
+	}
+}
+
+// TestAdminAuditLogListFilterByContributor verifies contributor filter narrows rows. REQ-409 scenario 2, 2.6.4.
+func TestAdminAuditLogListFilterByContributor(t *testing.T) {
+	store := parityStoreStub{
+		auditRows: []cloudstore.DashboardAuditRow{
+			{ID: 1, OccurredAt: "2026-04-24T00:00:00Z", Contributor: "alice", Project: "proj-a", Action: "mutation_push", Outcome: "rejected_project_paused"},
+		},
+	}
+	mux := newAuthedAdminMux(store)
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/dashboard/admin/audit-log/list?auth=ok&contributor=alice", nil)
+	req.Header.Set("HX-Request", "true")
+	mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d body=%q", rec.Code, rec.Body.String())
+	}
+	body := rec.Body.String()
+	if !strings.Contains(body, "alice") {
+		t.Errorf("expected alice in filtered audit list, body=%q", body)
+	}
+}
+
+// TestAdminAuditLogListPartialNonAdminDenied verifies non-admin gets 403 on list. REQ-409 scenario 3, 2.6.5.
+func TestAdminAuditLogListPartialNonAdminDenied(t *testing.T) {
+	mux := newAuthedMux(parityStoreStub{}, false)
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/dashboard/admin/audit-log/list?auth=ok", nil))
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("expected 403 for non-admin audit list, got %d body=%q", rec.Code, rec.Body.String())
+	}
+}
+
+// ─── JW2: Deep-link filter propagation to initial hx-get ─────────────────────
+
+// TestAdminAuditLogShellPropagatesFiltersToInitialHtmx verifies JW2: when the admin
+// audit log shell is loaded with filter query params (e.g. contributor=alice), the
+// initial hx-get URL must embed those same params so deep-linking preserves filters.
+func TestAdminAuditLogShellPropagatesFiltersToInitialHtmx(t *testing.T) {
+	mux := newAuthedAdminMux(parityStoreStub{})
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/dashboard/admin/audit-log?auth=ok&contributor=alice&outcome=rejected_project_paused", nil)
+	mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d body=%q", rec.Code, rec.Body.String())
+	}
+	body := rec.Body.String()
+	// The initial hx-get URL must include the contributor and outcome params.
+	if !strings.Contains(body, "contributor=alice") {
+		t.Errorf("expected contributor=alice forwarded in hx-get URL; body=%q", body)
+	}
+	if !strings.Contains(body, "outcome=rejected_project_paused") {
+		t.Errorf("expected outcome=rejected_project_paused forwarded in hx-get URL; body=%q", body)
+	}
+}
+
+// ─── JW6: parseAuditFilter date-only format + invalid format rejection ────────
+
+// TestAdminAuditLogListParsesDateOnlyFilter verifies JW6 part A: a date-only
+// value (YYYY-MM-DD) in the "from" param must be accepted and parsed correctly
+// (falling back from RFC3339 parse failure). Handler must return 200.
+func TestAdminAuditLogListParsesDateOnlyFilter(t *testing.T) {
+	mux := newAuthedAdminMux(parityStoreStub{})
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/dashboard/admin/audit-log/list?auth=ok&from=2026-04-24", nil)
+	req.Header.Set("HX-Request", "true")
+	mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200 for date-only from param, got %d body=%q", rec.Code, rec.Body.String())
+	}
+}
+
+// TestAdminAuditLogListRejectsInvalidTimeFormat verifies JW6 part B: a malformed
+// time value in the "from" param must result in HTTP 400 with error code
+// "invalid_time_format" rather than silently dropping the filter.
+func TestAdminAuditLogListRejectsInvalidTimeFormat(t *testing.T) {
+	mux := newAuthedAdminMux(parityStoreStub{})
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/dashboard/admin/audit-log/list?auth=ok&from=not-a-date", nil)
+	req.Header.Set("HX-Request", "true")
+	mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for invalid from param, got %d body=%q", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "invalid_time_format") {
+		t.Errorf("expected invalid_time_format in body, got %q", rec.Body.String())
+	}
+}
+
+// ─── N7: partial-only contract for handleAdminAuditLogList ───────────────────
+
+// TestAdminAuditLogListIsPartialOnlyNoLayoutWrapper verifies N7: the audit log list
+// endpoint must render a fragment (no full <html> layout) even when the request lacks
+// an HX-Request header. This is the partial-only contract (R6-2 equivalent).
+func TestAdminAuditLogListIsPartialOnlyNoLayoutWrapper(t *testing.T) {
+	mux := newAuthedAdminMux(parityStoreStub{})
+	rec := httptest.NewRecorder()
+	// Deliberately no HX-Request header — must still get fragment, not full layout.
+	req := httptest.NewRequest(http.MethodGet, "/dashboard/admin/audit-log/list?auth=ok", nil)
+	mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d body=%q", rec.Code, rec.Body.String())
+	}
+	body := rec.Body.String()
+	// Partial-only: must NOT contain <html> tag (that would be a full Layout wrapper).
+	if strings.Contains(body, "<html") {
+		t.Errorf("handleAdminAuditLogList returned full Layout wrapper for non-HTMX request; got <html> in body")
 	}
 }

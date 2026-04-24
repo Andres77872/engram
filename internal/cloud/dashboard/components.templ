@@ -718,6 +718,38 @@ templ ContributorDetailPage(contributor *cloudstore.DashboardContributorRow, ses
 
 // ─── Phase 8: Admin Views ───────────────────────────────────────────────────
 
+// adminNav renders the shared admin sub-navigation bar.
+// active should be one of: "overview", "projects", "users", "health", "audit-log".
+templ adminNav(active string) {
+	<div class="admin-nav">
+		if active == "overview" {
+			<a href="/dashboard/admin" class="active">Overview</a>
+		} else {
+			<a href="/dashboard/admin">Overview</a>
+		}
+		if active == "projects" {
+			<a href="/dashboard/admin/projects" class="active">Projects</a>
+		} else {
+			<a href="/dashboard/admin/projects">Projects</a>
+		}
+		if active == "users" {
+			<a href="/dashboard/admin/users" class="active">Users</a>
+		} else {
+			<a href="/dashboard/admin/users">Users</a>
+		}
+		if active == "health" {
+			<a href="/dashboard/admin/health" class="active">System Health</a>
+		} else {
+			<a href="/dashboard/admin/health">System Health</a>
+		}
+		if active == "audit-log" {
+			<a href="/dashboard/admin/audit-log" class="active">Audit Log</a>
+		} else {
+			<a href="/dashboard/admin/audit-log">Audit Log</a>
+		}
+	</div>
+}
+
 // AdminPage renders the admin dashboard landing with sub-navigation.
 // ADAPTED: SystemHealthInfo -> DashboardSystemHealth; ProjectSyncControl kept.
 templ AdminPage(health *cloudstore.DashboardSystemHealth, controls []cloudstore.ProjectSyncControl) {
@@ -728,12 +760,7 @@ templ AdminPage(health *cloudstore.DashboardSystemHealth, controls []cloudstore.
 				<h2>Admin Overview</h2>
 			</div>
 		</div>
-		<div class="admin-nav">
-			<a href="/dashboard/admin" class="active">Overview</a>
-			<a href="/dashboard/admin/projects">Projects</a>
-			<a href="/dashboard/admin/users">Users</a>
-			<a href="/dashboard/admin/health">System Health</a>
-		</div>
+		@adminNav("overview")
 		if health != nil {
 			<div class="dashboard-grid">
 				<div class="stat-card">
@@ -785,12 +812,7 @@ templ AdminProjectsPage(controls []cloudstore.ProjectSyncControl) {
 				<h2>Project Controls</h2>
 			</div>
 		</div>
-		<div class="admin-nav">
-			<a href="/dashboard/admin">Overview</a>
-			<a href="/dashboard/admin/projects" class="active">Projects</a>
-			<a href="/dashboard/admin/users">Users</a>
-			<a href="/dashboard/admin/health">System Health</a>
-		</div>
+		@adminNav("projects")
 		if len(controls) == 0 {
 			@EmptyState("No Managed Projects", "Projects appear here once cloud receives data or policy entries.")
 		} else {
@@ -901,12 +923,7 @@ templ AdminUsersPage() {
 				<h2>Admin Users</h2>
 			</div>
 		</div>
-		<div class="admin-nav">
-			<a href="/dashboard/admin">Overview</a>
-			<a href="/dashboard/admin/projects">Projects</a>
-			<a href="/dashboard/admin/users" class="active">Users</a>
-			<a href="/dashboard/admin/health">System Health</a>
-		</div>
+		@adminNav("users")
 		<h3 class="section-block-title">Contributors</h3>
 		<div id="admin-users-content"
 			hx-get="/dashboard/admin/users/list"
@@ -927,12 +944,7 @@ templ AdminHealthPage(health *cloudstore.DashboardSystemHealth) {
 				<h2>Admin Health</h2>
 			</div>
 		</div>
-		<div class="admin-nav">
-			<a href="/dashboard/admin">Overview</a>
-			<a href="/dashboard/admin/projects">Projects</a>
-			<a href="/dashboard/admin/users">Users</a>
-			<a href="/dashboard/admin/health" class="active">System Health</a>
-		</div>
+		@adminNav("health")
 		<h3 class="section-block-title">System Health</h3>
 		if health != nil {
 			<table class="data-table">
@@ -1139,4 +1151,84 @@ templ ObservationDetailPage(observation *cloudstore.DashboardObservationRow, ses
 			}
 		}
 	</section>
+}
+
+// ─── Phase 9: Audit Log Admin Views ─────────────────────────────────────────
+
+// AdminAuditLogPage renders the admin audit log shell page.
+// The HTMX container triggers loading the list partial on page load. REQ-408.
+// JW2: buildAuditListURL embeds active filter params into the initial hx-get URL
+// so that deep-linking /dashboard/admin/audit-log?contributor=alice preserves filters.
+templ AdminAuditLogPage(displayName string, filter cloudstore.AuditFilter) {
+	<section class="frame-section">
+		<div class="section-header">
+			<div>
+				<p class="section-kicker">ADMIN SURFACE</p>
+				<h2>Audit Log</h2>
+			</div>
+		</div>
+		@adminNav("audit-log")
+		<div id="audit-log-content"
+			hx-get={ buildAuditListURL(filter) }
+			hx-trigger="load"
+			hx-swap="innerHTML">
+			<p class="muted">Loading audit log...</p>
+		</div>
+	</section>
+}
+
+// AdminAuditLogListPartial renders the audit log table with filters and pagination. REQ-409, REQ-410.
+templ AdminAuditLogListPartial(entries []cloudstore.DashboardAuditRow, pg Pagination, filter cloudstore.AuditFilter) {
+	<div>
+		<form class="browser-controls" method="get" action="/dashboard/admin/audit-log/list"
+			hx-get="/dashboard/admin/audit-log/list"
+			hx-target="#audit-log-content"
+			hx-swap="innerHTML"
+			hx-trigger="submit">
+			<input id="audit-contributor" type="text" name="contributor" placeholder="Contributor" value={ filter.Contributor }/>
+			<input id="audit-project" type="text" name="project" placeholder="Project" value={ filter.Project }/>
+			<select id="audit-outcome" name="outcome">
+				<option value="">All Outcomes</option>
+				if filter.Outcome == cloudstore.AuditOutcomeRejectedProjectPaused {
+					<option value={ cloudstore.AuditOutcomeRejectedProjectPaused } selected>Rejected (Paused)</option>
+				} else {
+					<option value={ cloudstore.AuditOutcomeRejectedProjectPaused }>Rejected (Paused)</option>
+				}
+			</select>
+			<input id="audit-from" type="text" name="from" placeholder="From (RFC3339)" value={ auditTimeValue(filter.OccurredAtFrom) }/>
+			<input id="audit-to" type="text" name="to" placeholder="To (RFC3339)" value={ auditTimeValue(filter.OccurredAtTo) }/>
+			<button type="submit">Filter</button>
+		</form>
+		if len(entries) == 0 {
+			@EmptyState("No Audit Entries", "No audit log entries match the current filter.")
+		} else {
+			<table class="data-table">
+				<thead>
+					<tr>
+						<th>Time</th>
+						<th>Contributor</th>
+						<th>Project</th>
+						<th>Action</th>
+						<th>Outcome</th>
+						<th>Entries</th>
+						<th>Reason</th>
+					</tr>
+				</thead>
+				<tbody>
+					for _, entry := range entries {
+						<tr>
+							<td>{ formatTimestampStr(entry.OccurredAt) }</td>
+							<td>{ entry.Contributor }</td>
+							<td>{ entry.Project }</td>
+							<td>{ entry.Action }</td>
+							<td>{ entry.Outcome }</td>
+							<td>{ fmt.Sprint(entry.EntryCount) }</td>
+							<td>{ entry.ReasonCode }</td>
+						</tr>
+					}
+				</tbody>
+			</table>
+			@HtmxPaginationBar(pg, "/dashboard/admin/audit-log/list", "#audit-log-content", "#audit-contributor, #audit-project, #audit-outcome, #audit-from, #audit-to")
+		}
+	</div>
 }

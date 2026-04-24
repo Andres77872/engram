@@ -27,6 +27,7 @@ const (
 	SourceDirBasename      = "dir_basename"      // fallback: directory basename
 	SourceAmbiguous        = "ambiguous"         // cwd contains multiple git repos (Case 4)
 	SourceExplicitOverride = "explicit_override" // JR2-2: caller explicitly supplied a project name
+	SourceRequestBody      = "request_body"      // REQ-414: project came from the request body (server-side, no filesystem path)
 )
 
 // noiseSet lists directory names that are skipped during child-repo scanning.

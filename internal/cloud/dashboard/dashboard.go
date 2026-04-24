@@ -3,6 +3,7 @@ package dashboard
 //go:generate go tool templ generate
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"html"
@@ -11,6 +12,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"time"
 
 	"github.com/Gentleman-Programming/engram/internal/cloud/cloudstore"
 	"github.com/Gentleman-Programming/engram/internal/cloud/constants"
@@ -82,6 +84,9 @@ type DashboardStore interface {
 	// Batch 6: Connected navigation methods.
 	GetContributorDetail(name string) (cloudstore.DashboardContributorRow, []cloudstore.DashboardSessionRow, []cloudstore.DashboardObservationRow, []cloudstore.DashboardPromptRow, error)
 	ListDistinctTypes() ([]string, error)
+
+	// Audit log (REQ-409).
+	ListAuditEntriesPaginated(ctx context.Context, filter cloudstore.AuditFilter, limit, offset int) ([]cloudstore.DashboardAuditRow, int, error)
 }
 
 type handlers struct {
@@ -134,6 +139,10 @@ func Mount(mux *http.ServeMux, cfg MountConfig) {
 	mux.HandleFunc("GET /dashboard/sessions/{project}/{sessionID}", h.requireSession(h.handleSessionDetail))
 	mux.HandleFunc("GET /dashboard/observations/{project}/{sessionID}/{syncID}", h.requireSession(h.handleObservationDetail))
 	mux.HandleFunc("GET /dashboard/prompts/{project}/{sessionID}/{syncID}", h.requireSession(h.handlePromptDetail))
+
+	// Audit log routes — admin-gated (REQ-408, REQ-409).
+	mux.HandleFunc("GET /dashboard/admin/audit-log", h.requireSession(h.handleAdminAuditLog))
+	mux.HandleFunc("GET /dashboard/admin/audit-log/list", h.requireSession(h.handleAdminAuditLogList))
 }
 
 func Handler() http.Handler {
@@ -1043,4 +1052,128 @@ func renderHTMLStatus(w http.ResponseWriter, status int, body string) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.WriteHeader(status)
 	_, _ = w.Write([]byte(body))
+}
+
+// ─── Audit Log Handlers ───────────────────────────────────────────────────────
+
+// handleAdminAuditLog handles GET /dashboard/admin/audit-log (shell, admin-gated).
+// REQ-408: renders the AdminAuditLogPage templ component.
+// JW2: filter is parsed and forwarded to the initial hx-get URL for deep-linking.
+// JW6: invalid time formats yield 400.
+func (h *handlers) handleAdminAuditLog(w http.ResponseWriter, r *http.Request) {
+	p := h.principalFromRequest(r)
+	if !p.IsAdmin() {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+	filter, filterErr := parseAuditFilter(r)
+	if filterErr != "" {
+		http.Error(w, filterErr, http.StatusBadRequest)
+		return
+	}
+	component := AdminAuditLogPage(p.DisplayName(), filter)
+	if isHTMXRequest(r) {
+		renderComponent(w, r, component)
+		return
+	}
+	renderComponent(w, r, Layout("Audit Log", p.DisplayName(), "admin", p.IsAdmin(), component))
+}
+
+// handleAdminAuditLogList handles GET /dashboard/admin/audit-log/list (partial, admin-gated, HTMX).
+// REQ-409: renders AdminAuditLogListPartial with filter and pagination from query params.
+// JW6: invalid time format in from/to params yields 400 instead of silent drop.
+// N7: partial-only endpoint — always renders fragment, never a full Layout wrapper
+// (even for non-HTMX requests). Consistent with R6-2 partial-only contract.
+func (h *handlers) handleAdminAuditLogList(w http.ResponseWriter, r *http.Request) {
+	p := h.principalFromRequest(r)
+	if !p.IsAdmin() {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+	filter, filterErr := parseAuditFilter(r)
+	if filterErr != "" {
+		http.Error(w, filterErr, http.StatusBadRequest)
+		return
+	}
+	reqPage, pageSize := parsePaginationRaw(r)
+
+	var rows []cloudstore.DashboardAuditRow
+	var total int
+	if h.cfg.Store != nil {
+		var err error
+		rows, total, err = h.cfg.Store.ListAuditEntriesPaginated(r.Context(), filter, pageSize, (reqPage-1)*pageSize)
+		if err != nil {
+			log.Printf("dashboard: audit log list store error: %v", err)
+			renderComponentStatus(w, r, http.StatusBadGateway, EmptyState("Service Unavailable", "Audit log data is temporarily unavailable."))
+			return
+		}
+	}
+
+	// JW3: three-tier fallback pattern — consistent with other paginated handlers.
+	// Tier 1: initial fetch (above). Tier 2: clamped re-fetch on page-out-of-range.
+	// Tier 3: page-1 fallback when re-fetch fails and rows are empty.
+	pg, needsRefetch := reclampPagination(reqPage, pageSize, total)
+	if needsRefetch && h.cfg.Store != nil {
+		if refetched, _, err := h.cfg.Store.ListAuditEntriesPaginated(r.Context(), filter, pageSize, pg.Offset()); err == nil {
+			rows = refetched
+		} else {
+			log.Printf("dashboard: re-fetch audit log list page %d: %v (using first-page rows)", pg.Page, err)
+			if len(rows) == 0 {
+				if fallback, _, fallbackErr := h.cfg.Store.ListAuditEntriesPaginated(r.Context(), filter, pageSize, 0); fallbackErr == nil {
+					rows = fallback
+				} else {
+					log.Printf("dashboard: fallback audit log list page 1: %v", fallbackErr)
+				}
+			}
+		}
+	}
+
+	renderComponent(w, r, AdminAuditLogListPartial(rows, pg, filter))
+}
+
+// parseAuditTime tries RFC3339 then date-only (2006-01-02) formats.
+// Returns an error only when the value is non-empty and unparseable in either format.
+// JW6: accepting date-only prevents confusing silent drops while still being lenient.
+func parseAuditTime(value string) (time.Time, error) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return time.Time{}, nil
+	}
+	// Try RFC3339 first (most specific).
+	if t, err := time.Parse(time.RFC3339, value); err == nil {
+		return t, nil
+	}
+	// Fall back to date-only YYYY-MM-DD (midnight UTC).
+	if t, err := time.Parse("2006-01-02", value); err == nil {
+		return t.UTC(), nil
+	}
+	return time.Time{}, fmt.Errorf("invalid_time_format: %q is not RFC3339 or YYYY-MM-DD", value)
+}
+
+// parseAuditFilter extracts AuditFilter fields from the request query params.
+// Text filters are trimmed; time filters accept RFC3339 or date-only (YYYY-MM-DD). REQ-410.
+// Returns the filter and an error string; on error, error is non-empty and the caller
+// should return a 400 response. JW6 fix.
+func parseAuditFilter(r *http.Request) (cloudstore.AuditFilter, string) {
+	q := r.URL.Query()
+	filter := cloudstore.AuditFilter{
+		Contributor: strings.TrimSpace(q.Get("contributor")),
+		Project:     strings.TrimSpace(q.Get("project")),
+		Outcome:     strings.TrimSpace(q.Get("outcome")),
+	}
+	if from := strings.TrimSpace(q.Get("from")); from != "" {
+		t, err := parseAuditTime(from)
+		if err != nil {
+			return cloudstore.AuditFilter{}, err.Error()
+		}
+		filter.OccurredAtFrom = t
+	}
+	if to := strings.TrimSpace(q.Get("to")); to != "" {
+		t, err := parseAuditTime(to)
+		if err != nil {
+			return cloudstore.AuditFilter{}, err.Error()
+		}
+		filter.OccurredAtTo = t
+	}
+	return filter, ""
 }

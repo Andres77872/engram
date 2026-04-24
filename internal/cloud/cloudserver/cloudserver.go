@@ -14,6 +14,7 @@ import (
 	"github.com/Gentleman-Programming/engram/internal/cloud/cloudstore"
 	"github.com/Gentleman-Programming/engram/internal/cloud/constants"
 	"github.com/Gentleman-Programming/engram/internal/cloud/dashboard"
+	engramproject "github.com/Gentleman-Programming/engram/internal/project"
 	"github.com/Gentleman-Programming/engram/internal/store"
 	engramsync "github.com/Gentleman-Programming/engram/internal/sync"
 )
@@ -399,10 +400,37 @@ func (s *CloudServer) handlePushChunk(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if !enabled {
-			writeActionableError(w, http.StatusConflict,
-				constants.UpgradeErrorClassPolicy,
-				"sync-paused",
-				fmt.Sprintf("sync is paused for project %q", project))
+			// REQ-405: emit audit entry for chunk-push pause-rejection before writing 409.
+			// Structural type assertion — ChunkStore is NOT extended.
+			contributor := strings.TrimSpace(req.CreatedBy)
+			if contributor == "" {
+				contributor = "unknown"
+			}
+			if auditor, ok := s.store.(interface {
+				InsertAuditEntry(ctx context.Context, entry cloudstore.AuditEntry) error
+			}); ok {
+				if aerr := auditor.InsertAuditEntry(r.Context(), cloudstore.AuditEntry{
+					Contributor: contributor,
+					Project:     project,
+					Action:      cloudstore.AuditActionChunkPush,
+					Outcome:     cloudstore.AuditOutcomeRejectedProjectPaused,
+					ReasonCode:  "sync-paused",
+				}); aerr != nil {
+					log.Printf("cloudserver: audit insert failed (chunk push): %v", aerr)
+				}
+			} else {
+				log.Printf("cloudserver: store (%T) does not implement InsertAuditEntry; audit skipped", s.store)
+			}
+			// JW4: include project envelope fields in 409 response, consistent
+			// with the mutation push 409 envelope (REQ-414 parity for chunk path).
+			jsonResponse(w, http.StatusConflict, map[string]any{
+				"error_class":    strings.TrimSpace(constants.UpgradeErrorClassPolicy),
+				"error_code":     "sync-paused",
+				"error":          fmt.Sprintf("sync is paused for project %q", project),
+				"project":        project,
+				"project_source": engramproject.SourceRequestBody,
+				"project_path":   "",
+			})
 			return
 		}
 	}

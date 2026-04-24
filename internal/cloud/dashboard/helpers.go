@@ -462,6 +462,44 @@ func normalizeWhitespacePreserveParagraph(s string) string {
 	return strings.Join(cleaned, " ")
 }
 
+// auditTimeValue formats a time.Time for display in the audit log filter form.
+// Returns an RFC3339 string or empty string for zero values.
+func auditTimeValue(t time.Time) string {
+	if t.IsZero() {
+		return ""
+	}
+	return t.UTC().Format(time.RFC3339)
+}
+
+// buildAuditListURL constructs the /dashboard/admin/audit-log/list URL with
+// active filter query params embedded. Used to forward deep-link filters into
+// the initial HTMX hx-get attribute so that reloading the shell preserves filters.
+// JW2 fix: deep-linking /dashboard/admin/audit-log?contributor=alice must
+// propagate contributor=alice into the initial partial load.
+func buildAuditListURL(filter cloudstore.AuditFilter) string {
+	q := url.Values{}
+	if c := strings.TrimSpace(filter.Contributor); c != "" {
+		q.Set("contributor", c)
+	}
+	if p := strings.TrimSpace(filter.Project); p != "" {
+		q.Set("project", p)
+	}
+	if o := strings.TrimSpace(filter.Outcome); o != "" {
+		q.Set("outcome", o)
+	}
+	if !filter.OccurredAtFrom.IsZero() {
+		q.Set("from", filter.OccurredAtFrom.UTC().Format(time.RFC3339))
+	}
+	if !filter.OccurredAtTo.IsZero() {
+		q.Set("to", filter.OccurredAtTo.UTC().Format(time.RFC3339))
+	}
+	base := "/dashboard/admin/audit-log/list"
+	if len(q) == 0 {
+		return base
+	}
+	return base + "?" + q.Encode()
+}
+
 // typeBadgeVariant returns a badge color variant for an observation type.
 func typeBadgeVariant(obsType string) string {
 	switch obsType {
@@ -482,7 +520,15 @@ func safeQuery(urlPath string, rawQuery string) string {
 	if strings.TrimSpace(rawQuery) == "" {
 		return urlPath
 	}
-	return fmt.Sprintf("%s?%s", urlPath, html.EscapeString(rawQuery))
+	// N1: url.ParseQuery + Encode normalises the query (re-encodes special chars
+	// as percent-escapes) and avoids html.EscapeString turning '&' into '&amp;'
+	// which would corrupt multi-param URLs embedded in href attributes.
+	parsed, _ := url.ParseQuery(rawQuery)
+	encoded := parsed.Encode()
+	if encoded == "" {
+		return urlPath
+	}
+	return urlPath + "?" + encoded
 }
 
 func preserveQuery(rawQuery string, key, value string) string {

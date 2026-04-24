@@ -85,12 +85,23 @@ Dashboard route tree (`engram cloud serve`):
   - `GET /dashboard/browser/sessions/{sessionID}`
   - `GET /dashboard/browser/prompts` (`HX-Request: true` returns fragment; plain GET returns full page)
   - `GET /dashboard/projects`
+  - `GET /dashboard/projects/list` — HTMX partial; paginated project list with "Paused" badges
   - `GET /dashboard/projects/{project}`
+  - `GET /dashboard/projects/{name}/observations` — HTMX partial for project detail
+  - `GET /dashboard/projects/{name}/sessions` — HTMX partial for project detail
+  - `GET /dashboard/projects/{name}/prompts` — HTMX partial for project detail
   - `GET /dashboard/contributors`
+  - `GET /dashboard/contributors/list` — HTMX partial; paginated contributor list
   - `GET /dashboard/contributors/{contributor}`
   - `GET /dashboard/admin` (also requires admin token/session)
   - `GET /dashboard/admin/projects`
-  - `GET /dashboard/admin/contributors`
+  - `GET /dashboard/admin/users` (admin-gated)
+  - `GET /dashboard/admin/users/list` (admin-gated; HTMX partial)
+  - `GET /dashboard/admin/health` (admin-gated)
+  - `POST /dashboard/admin/projects/{name}/sync` (admin-gated; toggle sync enabled/disabled)
+  - `GET /dashboard/sessions/{project}/{sessionID}` — session detail with observations + prompts sub-lists
+  - `GET /dashboard/observations/{project}/{sessionID}/{syncID}` — observation detail
+  - `GET /dashboard/prompts/{project}/{sessionID}/{syncID}` — prompt detail
 
 Engram is local-first: local SQLite is authoritative; cloud features are optional replication/shared access and enrollment controls.
 
@@ -346,7 +357,7 @@ Error responses include `available_projects` when the error is `ambiguous_projec
 
 ### Write tools (no project arg)
 
-`mem_save`, `mem_save_prompt`, `mem_session_start`, `mem_session_end`, `mem_capture_passive`, `mem_update` — project is auto-detected from cwd. Any `project` argument the LLM sends is silently discarded.
+`mem_save`, `mem_save_prompt`, `mem_session_start`, `mem_session_end`, `mem_session_summary`, `mem_capture_passive`, `mem_update` — project is auto-detected from cwd. Any `project` argument the LLM sends is silently discarded.
 
 ### Read tools (optional project override)
 
@@ -825,21 +836,84 @@ Missing `ENGRAM_CLOUD_TOKEN` or `ENGRAM_CLOUD_SERVER` logs an `ERROR` and disabl
 
 ### Reason Code Table
 
+`reason_code` appears in `Manager.Status().ReasonCode` and is surfaced via `/sync/status`:
+
 | `reason_code` | Cause | Resolution |
 |---|---|---|
-| `transport_failed` | Network error or server 5xx | Check server health and network |
-| `server_unsupported` | Cloud server returned 404 on mutation endpoints | Deploy a newer server that supports `/sync/mutations/*` |
+| `transport_failed` | Network error, server 5xx, or 404 on mutation endpoints | Check server health and network; if 404, see `server_unsupported` note below |
 | `auth_required` | Bearer token rejected (401) | Rotate `ENGRAM_CLOUD_TOKEN` |
+| `policy_forbidden` | Project access denied (403) | Check `ENGRAM_CLOUD_ALLOWED_PROJECTS` on the server |
 | `internal_error` | Panic inside the sync cycle | Check logs for stack trace |
-| `upgrade_paused` | Autosync paused during cloud upgrade | Call `ResumeAfterUpgrade` or restart |
+| `upgrade_paused` | Autosync paused during cloud upgrade (`PhaseDisabled`) | Call `ResumeAfterUpgrade` or restart |
+
+Note: when the cloud server returns 404 on mutation endpoints, the transport logs `[autosync] cloud mutation endpoint returned 404 (server_unsupported)` and the transport-level `ErrorCode` is `"server_unsupported"`, but the manager surfaces this as `reason_code: transport_failed`.
 
 ### Troubleshooting
 
-**`server_unsupported` reason code**: The cloud server does not yet implement `POST /sync/mutations/push` or `GET /sync/mutations/pull`. Deploy a server version that includes these endpoints before enabling `ENGRAM_CLOUD_AUTOSYNC=1`.
+**`transport_failed` with `server_unsupported` in logs**: The cloud server does not yet implement `POST /sync/mutations/push` or `GET /sync/mutations/pull`. Deploy a server version that includes these endpoints before enabling `ENGRAM_CLOUD_AUTOSYNC=1`. Check logs for the line containing `server_unsupported`.
 
 **Autosync not starting**: Check that `ENGRAM_CLOUD_AUTOSYNC` is exactly `"1"` (not `"true"` or `"yes"`), and that both `ENGRAM_CLOUD_TOKEN` and `ENGRAM_CLOUD_SERVER` are non-empty. The process logs an `[autosync] ERROR` line explaining which variable is missing.
 
 **Local writes still blocked**: Autosync runs in its own goroutine and never holds locks shared with the local write path. If local writes appear blocked, investigate the SQLite store layer, not the autosync manager.
+
+---
+
+---
+
+## Cloud Sync Audit Log
+
+When project sync is paused and a push is rejected, Engram records an audit entry in `cloud_sync_audit_log`. This gives operators a persistent trail of every rejection event, visible in the admin dashboard under **Admin > Audit Log**.
+
+### Schema
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `id` | SERIAL PK | Auto-incrementing row identifier |
+| `occurred_at` | TIMESTAMPTZ DEFAULT NOW() | Timestamp of the rejection event |
+| `contributor` | TEXT NOT NULL | Identity of the caller (from `created_by` field in request, or `"unknown"`) |
+| `project` | TEXT NOT NULL | Project name that was paused and rejected |
+| `action` | TEXT NOT NULL | Push type discriminator: `mutation_push` or `chunk_push` |
+| `outcome` | TEXT NOT NULL | Rejection outcome: always `rejected_project_paused` in v1 |
+| `entry_count` | INT DEFAULT 0 | Number of entries in the rejected batch |
+| `reason_code` | TEXT | Short machine-readable reason code (e.g. `sync-paused`) |
+| `metadata` | JSONB | Reserved for future structured context; not populated in v1 |
+
+### Outcome Vocabulary
+
+| Outcome | Meaning |
+|---------|---------|
+| `rejected_project_paused` | Push was rejected because the project's sync is paused via the admin sync control |
+
+### Action Discriminator
+
+| Action | Meaning |
+|--------|---------|
+| `mutation_push` | Rejection occurred on `POST /sync/mutations/push` |
+| `chunk_push` | Rejection occurred on `POST /sync/push` (legacy chunk push) |
+
+Pull requests (`GET /sync/mutations/pull`) are never gated on pause status and never emit audit entries. Paused projects continue to serve reads to enrolled contributors without restriction.
+
+### Retention and Pruning
+
+There is no automatic retention policy in v1. Audit rows accumulate indefinitely. To prune entries older than 90 days, connect to Postgres and run:
+
+```sql
+DELETE FROM cloud_sync_audit_log
+WHERE occurred_at < NOW() - INTERVAL '90 days';
+```
+
+Wrap in a transaction and add a `LIMIT` clause if the table is large:
+
+```sql
+BEGIN;
+DELETE FROM cloud_sync_audit_log
+WHERE id IN (
+  SELECT id FROM cloud_sync_audit_log
+  WHERE occurred_at < NOW() - INTERVAL '90 days'
+  LIMIT 10000
+);
+COMMIT;
+```
 
 ---
 

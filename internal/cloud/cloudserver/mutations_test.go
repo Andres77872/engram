@@ -10,6 +10,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/Gentleman-Programming/engram/internal/cloud/cloudstore"
 )
 
 // ─── Fakes for mutation tests ─────────────────────────────────────────────────
@@ -20,6 +22,18 @@ type fakeMutationStore struct {
 	syncEnabledMap map[string]bool // project → sync enabled
 	errInsert      error
 	errList        error
+	// Audit capture (for REQ-404, REQ-406, REQ-412 tests).
+	auditCalls     []cloudstore.AuditEntry
+	errAuditInsert error
+}
+
+// InsertAuditEntry records the call for test assertions.
+func (s *fakeMutationStore) InsertAuditEntry(_ context.Context, entry cloudstore.AuditEntry) error {
+	if s.errAuditInsert != nil {
+		return s.errAuditInsert
+	}
+	s.auditCalls = append(s.auditCalls, entry)
+	return nil
 }
 
 func newFakeMutationStore() *fakeMutationStore {
@@ -189,7 +203,8 @@ func TestMutationPushEndpointBatchTooLarge(t *testing.T) {
 }
 
 func TestMutationPushEndpointEmptyBatch(t *testing.T) {
-	// REQ-200 empty entries → 200 with accepted_seqs: []
+	// JC1: empty batch → 400 empty_batch (changed from prior 200 behavior).
+	// Empty batches carry no project info; they cannot be pause-gated or audited.
 	ms := newFakeMutationStore()
 	srv := newMutationTestServer(ms, "secret", []string{"proj-a"})
 
@@ -202,17 +217,37 @@ func TestMutationPushEndpointEmptyBatch(t *testing.T) {
 	req.Header.Set("Content-Type", "application/json")
 	srv.Handler().ServeHTTP(rec, req)
 
-	if rec.Code != http.StatusOK {
-		t.Fatalf("expected 200, got %d body=%q", rec.Code, rec.Body.String())
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for empty batch, got %d body=%q", rec.Code, rec.Body.String())
+	}
+}
+
+// TestMutationPushEmptyBatchRejectedWith400 verifies JC1: empty batch must return
+// HTTP 400 with error_code=empty_batch. Empty batches carry no project info so they
+// cannot be pause-gated; forcing 400 gives deterministic client feedback.
+func TestMutationPushEmptyBatchRejectedWith400(t *testing.T) {
+	ms := newFakeMutationStore()
+	srv := newMutationTestServer(ms, "secret", []string{"proj-a"})
+
+	body := marshalPushRequest(t, []MutationEntry{}) // empty slice
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/sync/mutations/push", body)
+	req.Header.Set("Authorization", "Bearer secret")
+	req.Header.Set("Content-Type", "application/json")
+	srv.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for empty batch, got %d body=%q", rec.Code, rec.Body.String())
 	}
 	var resp struct {
-		AcceptedSeqs []int64 `json:"accepted_seqs"`
+		ErrorCode string `json:"error_code"`
 	}
 	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
 		t.Fatalf("decode response: %v", err)
 	}
-	if len(resp.AcceptedSeqs) != 0 {
-		t.Fatalf("expected empty accepted_seqs, got %v", resp.AcceptedSeqs)
+	if resp.ErrorCode != "empty_batch" {
+		t.Errorf("expected error_code=empty_batch, got %q", resp.ErrorCode)
 	}
 }
 
@@ -803,4 +838,285 @@ func marshalPushRequest(t *testing.T, entries []MutationEntry) *bytes.Buffer {
 		t.Fatalf("marshal push request: %v", err)
 	}
 	return bytes.NewBuffer(body)
+}
+
+func marshalPushRequestWithCreatedBy(t *testing.T, entries []MutationEntry, createdBy string) *bytes.Buffer {
+	t.Helper()
+	body, err := json.Marshal(map[string]any{"entries": entries, "created_by": createdBy})
+	if err != nil {
+		t.Fatalf("marshal push request with created_by: %v", err)
+	}
+	return bytes.NewBuffer(body)
+}
+
+// ─── REQ-404, REQ-406, REQ-412: Audit emission tests ─────────────────────────
+
+// TestMutationPushPaused409EmitsAudit verifies that a paused-project 409 emits
+// exactly one audit call with Action=mutation_push, Outcome=rejected_project_paused.
+// REQ-404 scenario 1, 2.1.1.
+func TestMutationPushPaused409EmitsAudit(t *testing.T) {
+	ms := newFakeMutationStore()
+	ms.syncEnabledMap["proj-a"] = false // paused
+
+	srv := newMutationTestServer(ms, "secret", []string{"proj-a"})
+	entries := makeMutationEntries(2, "proj-a")
+	body := marshalPushRequest(t, entries)
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/sync/mutations/push", body)
+	req.Header.Set("Authorization", "Bearer secret")
+	req.Header.Set("Content-Type", "application/json")
+	srv.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("expected 409, got %d body=%q", rec.Code, rec.Body.String())
+	}
+	if len(ms.auditCalls) != 1 {
+		t.Fatalf("expected 1 audit call on paused 409, got %d", len(ms.auditCalls))
+	}
+	audit := ms.auditCalls[0]
+	if audit.Action != cloudstore.AuditActionMutationPush {
+		t.Errorf("audit action: got %q, want %q", audit.Action, cloudstore.AuditActionMutationPush)
+	}
+	if audit.Outcome != cloudstore.AuditOutcomeRejectedProjectPaused {
+		t.Errorf("audit outcome: got %q, want %q", audit.Outcome, cloudstore.AuditOutcomeRejectedProjectPaused)
+	}
+}
+
+// TestMutationPushNonPaused200EmitsNoAudit verifies that a successful push
+// emits zero audit calls. REQ-404 scenario 2, 2.1.2.
+func TestMutationPushNonPaused200EmitsNoAudit(t *testing.T) {
+	ms := newFakeMutationStore()
+	ms.syncEnabledMap["proj-a"] = true // enabled
+
+	srv := newMutationTestServer(ms, "secret", []string{"proj-a"})
+	entries := makeMutationEntries(1, "proj-a")
+	body := marshalPushRequest(t, entries)
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/sync/mutations/push", body)
+	req.Header.Set("Authorization", "Bearer secret")
+	req.Header.Set("Content-Type", "application/json")
+	srv.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d body=%q", rec.Code, rec.Body.String())
+	}
+	if len(ms.auditCalls) != 0 {
+		t.Errorf("expected 0 audit calls on non-paused 200, got %d", len(ms.auditCalls))
+	}
+}
+
+// TestMutationPushPausedWithCreatedBy verifies that created_by field populates
+// the audit contributor. REQ-406 scenario 1, 2.1.3.
+func TestMutationPushPausedWithCreatedBy(t *testing.T) {
+	ms := newFakeMutationStore()
+	ms.syncEnabledMap["proj-a"] = false
+
+	srv := newMutationTestServer(ms, "secret", []string{"proj-a"})
+	entries := makeMutationEntries(1, "proj-a")
+	body := marshalPushRequestWithCreatedBy(t, entries, "alice")
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/sync/mutations/push", body)
+	req.Header.Set("Authorization", "Bearer secret")
+	req.Header.Set("Content-Type", "application/json")
+	srv.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("expected 409, got %d body=%q", rec.Code, rec.Body.String())
+	}
+	if len(ms.auditCalls) != 1 {
+		t.Fatalf("expected 1 audit call, got %d", len(ms.auditCalls))
+	}
+	if ms.auditCalls[0].Contributor != "alice" {
+		t.Errorf("expected contributor=alice, got %q", ms.auditCalls[0].Contributor)
+	}
+}
+
+// TestMutationPushPausedWithoutCreatedByDefaultsUnknown verifies that missing
+// created_by defaults contributor to "unknown". REQ-406 scenario 2, 2.1.4.
+func TestMutationPushPausedWithoutCreatedByDefaultsUnknown(t *testing.T) {
+	ms := newFakeMutationStore()
+	ms.syncEnabledMap["proj-a"] = false
+
+	srv := newMutationTestServer(ms, "secret", []string{"proj-a"})
+	entries := makeMutationEntries(1, "proj-a")
+	body := marshalPushRequest(t, entries) // no created_by
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/sync/mutations/push", body)
+	req.Header.Set("Authorization", "Bearer secret")
+	req.Header.Set("Content-Type", "application/json")
+	srv.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("expected 409, got %d body=%q", rec.Code, rec.Body.String())
+	}
+	if len(ms.auditCalls) != 1 {
+		t.Fatalf("expected 1 audit call, got %d", len(ms.auditCalls))
+	}
+	if ms.auditCalls[0].Contributor != "unknown" {
+		t.Errorf("expected contributor=unknown, got %q", ms.auditCalls[0].Contributor)
+	}
+}
+
+// TestMutationPushAuditInsertFailureStill409 verifies that even when InsertAuditEntry
+// returns an error, the handler still returns 409 (no 5xx). REQ-404 scenario 3, 2.1.5.
+func TestMutationPushAuditInsertFailureStill409(t *testing.T) {
+	ms := newFakeMutationStore()
+	ms.syncEnabledMap["proj-a"] = false
+	ms.errAuditInsert = fmt.Errorf("db connection lost")
+
+	srv := newMutationTestServer(ms, "secret", []string{"proj-a"})
+	entries := makeMutationEntries(1, "proj-a")
+	body := marshalPushRequest(t, entries)
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/sync/mutations/push", body)
+	req.Header.Set("Authorization", "Bearer secret")
+	req.Header.Set("Content-Type", "application/json")
+	srv.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("expected 409 even when audit insert fails, got %d body=%q", rec.Code, rec.Body.String())
+	}
+}
+
+// ─── REQ-414: Response envelope project fields ────────────────────────────────
+
+// mutationPushResponseEnvelope is a superset decode target used in REQ-414 tests.
+type mutationPushResponseEnvelope struct {
+	AcceptedSeqs  []int64 `json:"accepted_seqs"`
+	Project       string  `json:"project"`
+	ProjectSource string  `json:"project_source"`
+	ProjectPath   string  `json:"project_path"`
+}
+
+// mutationPullResponseEnvelope is a superset decode target used in REQ-414 tests.
+type mutationPullResponseEnvelope struct {
+	Mutations     []json.RawMessage `json:"mutations"`
+	HasMore       bool              `json:"has_more"`
+	LatestSeq     int64             `json:"latest_seq"`
+	Project       string            `json:"project"`
+	ProjectSource string            `json:"project_source"`
+	ProjectPath   string            `json:"project_path"`
+}
+
+// TestMutationPushResponseEnvelopeHasProjectFields verifies REQ-414 success path:
+// a 200 OK response from handleMutationPush must include project, project_source,
+// and project_path in the JSON body.
+func TestMutationPushResponseEnvelopeHasProjectFields(t *testing.T) {
+	ms := newFakeMutationStore()
+	ms.syncEnabledMap["proj-a"] = true // enabled — success path
+
+	srv := newMutationTestServer(ms, "secret", []string{"proj-a"})
+	entries := makeMutationEntries(1, "proj-a")
+	body := marshalPushRequest(t, entries)
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/sync/mutations/push", body)
+	req.Header.Set("Authorization", "Bearer secret")
+	req.Header.Set("Content-Type", "application/json")
+	srv.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d body=%q", rec.Code, rec.Body.String())
+	}
+
+	bodyBytes := rec.Body.Bytes()
+	var resp mutationPushResponseEnvelope
+	if err := json.Unmarshal(bodyBytes, &resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if resp.Project != "proj-a" {
+		t.Errorf("project: got %q, want %q", resp.Project, "proj-a")
+	}
+	if resp.ProjectSource != "request_body" {
+		t.Errorf("project_source: got %q, want %q", resp.ProjectSource, "request_body")
+	}
+	// project_path must be present (empty string is acceptable for server-side)
+	// JSON field must be emitted — check via raw decode
+	var raw map[string]json.RawMessage
+	_ = json.Unmarshal(bodyBytes, &raw)
+	if _, ok := raw["project_path"]; !ok {
+		t.Error("project_path field must be present in response JSON")
+	}
+}
+
+// TestMutationPushPausedResponseEnvelopeHasProjectFields verifies REQ-414 409 path:
+// a 409 conflict response from handleMutationPush must include project, project_source,
+// and project_path fields in the JSON body (in addition to error fields).
+func TestMutationPushPausedResponseEnvelopeHasProjectFields(t *testing.T) {
+	ms := newFakeMutationStore()
+	ms.syncEnabledMap["proj-a"] = false // paused — 409 path
+
+	srv := newMutationTestServer(ms, "secret", []string{"proj-a"})
+	entries := makeMutationEntries(1, "proj-a")
+	body := marshalPushRequest(t, entries)
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/sync/mutations/push", body)
+	req.Header.Set("Authorization", "Bearer secret")
+	req.Header.Set("Content-Type", "application/json")
+	srv.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("expected 409, got %d body=%q", rec.Code, rec.Body.String())
+	}
+
+	bodyBytes := rec.Body.Bytes()
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(bodyBytes, &raw); err != nil {
+		t.Fatalf("decode 409 body: %v; body=%s", err, bodyBytes)
+	}
+	for _, field := range []string{"project", "project_source", "project_path"} {
+		if _, ok := raw[field]; !ok {
+			t.Errorf("409 response missing required field %q; body=%s", field, bodyBytes)
+		}
+	}
+	var projectVal string
+	if err := json.Unmarshal(raw["project"], &projectVal); err != nil || projectVal != "proj-a" {
+		t.Errorf("project: got %q, want %q", projectVal, "proj-a")
+	}
+	var sourceVal string
+	if err := json.Unmarshal(raw["project_source"], &sourceVal); err != nil || sourceVal != "request_body" {
+		t.Errorf("project_source: got %q, want %q", sourceVal, "request_body")
+	}
+}
+
+// TestMutationPullResponseEnvelopeHasProjectFields verifies REQ-414 for the pull path:
+// the 200 pull response must include project, project_source, and project_path.
+// For pull, the project reflects the primary enrolled project of the caller.
+func TestMutationPullResponseEnvelopeHasProjectFields(t *testing.T) {
+	ms := newFakeMutationStore()
+	_, _ = ms.InsertMutationBatch(context.Background(), []MutationEntry{
+		{Project: "proj-a", Entity: "obs", EntityKey: "k1", Op: "upsert", Payload: json.RawMessage(`{}`)},
+	})
+
+	srv := newMutationTestServer(ms, "secret", []string{"proj-a"})
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/sync/mutations/pull?since_seq=0&limit=10", nil)
+	req.Header.Set("Authorization", "Bearer secret")
+	srv.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d body=%q", rec.Code, rec.Body.String())
+	}
+
+	bodyBytes := rec.Body.Bytes()
+	var resp mutationPullResponseEnvelope
+	if err := json.Unmarshal(bodyBytes, &resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if resp.ProjectSource != "request_body" {
+		t.Errorf("project_source: got %q, want %q", resp.ProjectSource, "request_body")
+	}
+	// project_path must be emitted (empty string acceptable)
+	var raw map[string]json.RawMessage
+	_ = json.Unmarshal(bodyBytes, &raw)
+	if _, ok := raw["project_path"]; !ok {
+		t.Error("project_path field must be present in pull response JSON")
+	}
 }

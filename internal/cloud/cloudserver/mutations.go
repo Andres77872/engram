@@ -8,10 +8,10 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
-	"time"
 
 	"github.com/Gentleman-Programming/engram/internal/cloud/cloudstore"
 	"github.com/Gentleman-Programming/engram/internal/cloud/constants"
+	"github.com/Gentleman-Programming/engram/internal/project"
 )
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -20,6 +20,13 @@ import (
 // Using a type alias ensures cloudstore.CloudStore satisfies MutationStore without
 // adapter shims.
 type MutationEntry = cloudstore.MutationEntry
+
+// mutationPushEnvelope is the parsed request body for POST /sync/mutations/push.
+// CreatedBy is optional and non-breaking — absent fields default to "unknown".
+type mutationPushEnvelope struct {
+	Entries   []MutationEntry `json:"entries"`
+	CreatedBy string          `json:"created_by,omitempty"`
+}
 
 // StoredMutation is an alias for cloudstore.StoredMutation (canonical read type).
 type StoredMutation = cloudstore.StoredMutation
@@ -56,9 +63,7 @@ const defaultPullLimit = 100
 func (s *CloudServer) handleMutationPush(w http.ResponseWriter, r *http.Request) {
 	r.Body = http.MaxBytesReader(w, r.Body, maxPushBodyBytes)
 
-	var req struct {
-		Entries []MutationEntry `json:"entries"`
-	}
+	var req mutationPushEnvelope
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, fmt.Sprintf("invalid request body: %v", err), http.StatusBadRequest)
 		return
@@ -66,6 +71,14 @@ func (s *CloudServer) handleMutationPush(w http.ResponseWriter, r *http.Request)
 
 	if len(req.Entries) > maxMutationBatchSize {
 		http.Error(w, fmt.Sprintf("batch too large: max %d entries per request", maxMutationBatchSize), http.StatusBadRequest)
+		return
+	}
+
+	// JC1: Empty batch is rejected early — empty batches carry no project info and
+	// cannot be pause-gated or audited. Clients must send at least one entry.
+	if len(req.Entries) == 0 {
+		writeActionableError(w, http.StatusBadRequest, constants.UpgradeErrorClassRepairable, "empty_batch",
+			"mutation batch must contain at least one entry")
 		return
 	}
 
@@ -80,14 +93,22 @@ func (s *CloudServer) handleMutationPush(w http.ResponseWriter, r *http.Request)
 		}
 	}
 
+	// N4: Assert MutationStore once here; use ms throughout (pause gate + InsertMutationBatch).
+	// This avoids the double assertion that existed before (once inside an if-ok block at the
+	// pause gate and once again before InsertMutationBatch).
+	ms, ok := s.store.(MutationStore)
+	if !ok {
+		http.Error(w, "mutation store not available", http.StatusInternalServerError)
+		return
+	}
+
 	// BC2: Authorize every distinct project in the batch before accepting any entry.
 	// If ANY project is unauthorized, the entire batch is rejected (all-or-nothing).
+	// N2: The empty-project `continue` is removed — BR2-1 (lines above) already
+	// guarantees every entry has a non-empty project before this loop is reached.
 	seen := make(map[string]struct{})
 	for _, entry := range req.Entries {
 		project := strings.TrimSpace(entry.Project)
-		if project == "" {
-			continue
-		}
 		if _, ok := seen[project]; ok {
 			continue
 		}
@@ -98,37 +119,54 @@ func (s *CloudServer) handleMutationPush(w http.ResponseWriter, r *http.Request)
 		}
 	}
 
+	// REQ-414: Resolve primary project from request body (first entry).
+	// Server-side has no filesystem cwd semantics; source is always "request_body".
+	// N3: The `if len(req.Entries) > 0` guard is removed — JC1 (above) guarantees
+	// at least one entry exists at this point.
+	primaryProject := strings.TrimSpace(req.Entries[0].Project)
+
 	// Check sync pause per project (REQ-203 + BW9: use writeActionableError for 409).
-	if ms, ok := s.store.(MutationStore); ok {
-		for _, entry := range req.Entries {
-			project := strings.TrimSpace(entry.Project)
-			if project == "" {
-				continue
-			}
-			enabled, err := ms.IsProjectSyncEnabled(project)
-			if err != nil {
-				http.Error(w, fmt.Sprintf("check project sync: %v", err), http.StatusInternalServerError)
-				return
-			}
-			if !enabled {
-				// BW9: structured error envelope so clients can parse error_class/error_code.
-				writeActionableError(w, http.StatusConflict, constants.UpgradeErrorClassPolicy, "sync-paused",
-					fmt.Sprintf("sync is paused for project %q", project))
-				return
-			}
+	for _, entry := range req.Entries {
+		proj := strings.TrimSpace(entry.Project)
+		enabled, err := ms.IsProjectSyncEnabled(proj)
+		if err != nil {
+			http.Error(w, fmt.Sprintf("check project sync: %v", err), http.StatusInternalServerError)
+			return
 		}
-	}
-
-	// Empty batch → 200 with empty accepted_seqs.
-	if len(req.Entries) == 0 {
-		jsonResponse(w, http.StatusOK, map[string]any{"accepted_seqs": []int64{}})
-		return
-	}
-
-	ms, ok := s.store.(MutationStore)
-	if !ok {
-		http.Error(w, "mutation store not available", http.StatusInternalServerError)
-		return
+		if !enabled {
+			// REQ-404: emit audit entry for pause-rejection before writing 409 response.
+			// Uses structural type assertion — MutationStore is NOT extended.
+			contributor := strings.TrimSpace(req.CreatedBy)
+			if contributor == "" {
+				contributor = "unknown"
+			}
+			if auditor, ok := s.store.(interface {
+				InsertAuditEntry(ctx context.Context, entry cloudstore.AuditEntry) error
+			}); ok {
+				if aerr := auditor.InsertAuditEntry(r.Context(), cloudstore.AuditEntry{
+					Contributor: contributor,
+					Project:     proj,
+					Action:      cloudstore.AuditActionMutationPush,
+					Outcome:     cloudstore.AuditOutcomeRejectedProjectPaused,
+					EntryCount:  len(req.Entries),
+					ReasonCode:  "sync-paused",
+				}); aerr != nil {
+					log.Printf("cloudserver: audit insert failed (mutation push): %v", aerr)
+				}
+			} else {
+				log.Printf("cloudserver: store (%T) does not implement InsertAuditEntry; audit skipped", s.store)
+			}
+			// REQ-414: include project envelope in 409 response alongside error fields.
+			jsonResponse(w, http.StatusConflict, map[string]any{
+				"error_class":    strings.TrimSpace(constants.UpgradeErrorClassPolicy),
+				"error_code":     "sync-paused",
+				"error":          fmt.Sprintf("sync is paused for project %q", proj),
+				"project":        primaryProject,
+				"project_source": project.SourceRequestBody,
+				"project_path":   "",
+			})
+			return
+		}
 	}
 
 	acceptedSeqs, err := ms.InsertMutationBatch(r.Context(), req.Entries)
@@ -137,7 +175,13 @@ func (s *CloudServer) handleMutationPush(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	jsonResponse(w, http.StatusOK, map[string]any{"accepted_seqs": acceptedSeqs})
+	// REQ-414: include project envelope in 200 response.
+	jsonResponse(w, http.StatusOK, map[string]any{
+		"accepted_seqs":  acceptedSeqs,
+		"project":        primaryProject,
+		"project_source": project.SourceRequestBody,
+		"project_path":   "",
+	})
 }
 
 // handleMutationPull handles GET /sync/mutations/pull.
@@ -179,12 +223,22 @@ func (s *CloudServer) handleMutationPull(w http.ResponseWriter, r *http.Request)
 		}
 	}
 
+	// REQ-414: For pull, primary project = first enrolled project (or empty if none).
+	// Server-side has no filesystem cwd; source is always "request_body".
+	pullPrimaryProject := ""
+	if len(allowedProjects) > 0 {
+		pullPrimaryProject = allowedProjects[0]
+	}
+
 	ms, ok := s.store.(MutationStore)
 	if !ok {
 		jsonResponse(w, http.StatusOK, map[string]any{
-			"mutations":  []StoredMutation{},
-			"has_more":   false,
-			"latest_seq": int64(0),
+			"mutations":      []StoredMutation{},
+			"has_more":       false,
+			"latest_seq":     int64(0),
+			"project":        pullPrimaryProject,
+			"project_source": project.SourceRequestBody,
+			"project_path":   "",
 		})
 		return
 	}
@@ -199,18 +253,17 @@ func (s *CloudServer) handleMutationPull(w http.ResponseWriter, r *http.Request)
 		mutations = []StoredMutation{}
 	}
 
+	// REQ-414: include project envelope in 200 pull response.
 	jsonResponse(w, http.StatusOK, map[string]any{
-		"mutations":  mutations,
-		"has_more":   hasMore,
-		"latest_seq": latestSeq,
+		"mutations":      mutations,
+		"has_more":       hasMore,
+		"latest_seq":     latestSeq,
+		"project":        pullPrimaryProject,
+		"project_source": project.SourceRequestBody,
+		"project_path":   "",
 	})
 }
 
 // ─── Cloudstore mutation queries ──────────────────────────────────────────────
 // These are implemented directly on CloudStore in cloudstore/cloudstore.go.
 // The migration adds a cloud_mutations table. See AddMutationMigrations().
-
-// mutationOccurredAt returns a stable RFC3339 timestamp for a stored mutation.
-func mutationOccurredAt() string {
-	return time.Now().UTC().Format(time.RFC3339)
-}

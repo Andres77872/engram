@@ -489,6 +489,21 @@ func (cs *CloudStore) migrate(ctx context.Context) error {
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_cloud_mutations_project ON cloud_mutations(project)`,
 		`CREATE INDEX IF NOT EXISTS idx_cloud_mutations_seq ON cloud_mutations(seq)`,
+		// cloud_sync_audit_log: persistent audit trail for push-rejection events (REQ-400).
+		`CREATE TABLE IF NOT EXISTS cloud_sync_audit_log (
+			id           SERIAL PRIMARY KEY,
+			occurred_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+			contributor  TEXT NOT NULL,
+			project      TEXT NOT NULL,
+			action       TEXT NOT NULL,
+			outcome      TEXT NOT NULL,
+			entry_count  INT NOT NULL DEFAULT 0,
+			reason_code  TEXT,
+			metadata     JSONB
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_audit_log_occurred_at ON cloud_sync_audit_log (occurred_at DESC)`,
+		`CREATE INDEX IF NOT EXISTS idx_audit_log_contributor_project ON cloud_sync_audit_log (contributor, project)`,
+		`CREATE INDEX IF NOT EXISTS idx_audit_log_outcome ON cloud_sync_audit_log (outcome)`,
 	}
 	for _, q := range queries {
 		if _, err := cs.db.ExecContext(ctx, q); err != nil {
