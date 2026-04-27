@@ -2656,6 +2656,125 @@ func TestMarkCloudSyncFailureClassifiesHTTPStatusCodes(t *testing.T) {
 	}
 }
 
+func TestMarkCloudSyncFailureStoresRepairGuidance(t *testing.T) {
+	cfg := testConfig(t)
+	s, err := store.New(cfg)
+	if err != nil {
+		t.Fatalf("store.New: %v", err)
+	}
+	defer s.Close()
+
+	targetKey := cloudTargetKeyForProject("proj-a")
+	syncErr := &remote.HTTPStatusError{
+		Operation:  "push chunk abc123",
+		StatusCode: http.StatusBadRequest,
+		ErrorClass: "repairable",
+		ErrorCode:  "upgrade_repairable_legacy_mutation_payload",
+		Body:       "legacy mutation payload missing required field: directory is required",
+	}
+	markCloudSyncFailure(s, targetKey, syncErr)
+
+	state, err := s.GetSyncState(targetKey)
+	if err != nil {
+		t.Fatalf("get sync state: %v", err)
+	}
+	if state.LastError == nil {
+		t.Fatal("expected stored last_error")
+	}
+	for _, want := range []string{
+		"legacy mutation payload missing required field",
+		"Known repairable cloud sync failure detected.",
+		"engram cloud upgrade doctor --project proj-a",
+		"engram cloud upgrade repair --project proj-a --dry-run",
+		"engram cloud upgrade repair --project proj-a --apply",
+		"engram sync --cloud --project proj-a",
+	} {
+		if !strings.Contains(*state.LastError, want) {
+			t.Fatalf("expected last_error to contain %q, got %q", want, *state.LastError)
+		}
+	}
+	if strings.Contains(*state.LastError, "--auto-repair") {
+		t.Fatalf("guidance must not mention auto-repair, got %q", *state.LastError)
+	}
+	upgradeState, err := s.GetCloudUpgradeState("proj-a")
+	if err != nil {
+		t.Fatalf("get cloud upgrade state: %v", err)
+	}
+	if upgradeState != nil {
+		t.Fatalf("sync failure guidance must not auto-create repair state, got %+v", upgradeState)
+	}
+}
+
+func TestCmdSyncCloudFailurePrintsRepairGuidance(t *testing.T) {
+	stubExitWithPanic(t)
+	stubRuntimeHooks(t)
+
+	oldSyncExport := syncExport
+	t.Cleanup(func() { syncExport = oldSyncExport })
+
+	workDir := t.TempDir()
+	withCwd(t, workDir)
+	cfg := testConfig(t)
+	t.Setenv("ENGRAM_CLOUD_SERVER", "https://cloud.example.test")
+	t.Setenv("ENGRAM_CLOUD_TOKEN", "token-abc")
+
+	s, err := store.New(cfg)
+	if err != nil {
+		t.Fatalf("store.New: %v", err)
+	}
+	if err := s.EnrollProject("proj-a"); err != nil {
+		_ = s.Close()
+		t.Fatalf("enroll project: %v", err)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatalf("close store: %v", err)
+	}
+
+	repairableErr := &remote.HTTPStatusError{
+		Operation:  "push chunk abc123",
+		StatusCode: http.StatusBadRequest,
+		ErrorClass: "repairable",
+		ErrorCode:  "upgrade_repairable_payload_invalid",
+		Body:       "invalid upsert payload: sessions[0].directory is required",
+	}
+	syncExport = func(*engramsync.Syncer, string, string) (*engramsync.SyncResult, error) {
+		return nil, repairableErr
+	}
+
+	withArgs(t, "engram", "sync", "--cloud", "--project", "proj-a")
+	_, stderr, recovered := captureOutputAndRecover(t, func() { cmdSync(cfg) })
+	if code, ok := recovered.(exitCode); !ok || int(code) != 1 {
+		t.Fatalf("expected fatal exit code 1, got %v", recovered)
+	}
+	for _, want := range []string{
+		"invalid upsert payload: sessions[0].directory is required",
+		"Known repairable cloud sync failure detected.",
+		"engram cloud upgrade doctor --project proj-a",
+		"engram cloud upgrade repair --project proj-a --dry-run",
+		"engram cloud upgrade repair --project proj-a --apply",
+		"engram sync --cloud --project proj-a",
+	} {
+		if !strings.Contains(stderr, want) {
+			t.Fatalf("expected stderr to contain %q, got %q", want, stderr)
+		}
+	}
+	if strings.Contains(stderr, "--auto-repair") {
+		t.Fatalf("guidance must not mention auto-repair, got %q", stderr)
+	}
+	s, err = store.New(cfg)
+	if err != nil {
+		t.Fatalf("store.New after failure: %v", err)
+	}
+	defer s.Close()
+	upgradeState, err := s.GetCloudUpgradeState("proj-a")
+	if err != nil {
+		t.Fatalf("get cloud upgrade state: %v", err)
+	}
+	if upgradeState != nil {
+		t.Fatalf("sync --cloud failure guidance must not auto-create repair state, got %+v", upgradeState)
+	}
+}
+
 func TestCmdSyncCloudSuccessMarksTargetHealthy(t *testing.T) {
 	stubExitWithPanic(t)
 	stubRuntimeHooks(t)

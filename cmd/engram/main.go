@@ -30,6 +30,7 @@ import (
 	"github.com/Gentleman-Programming/engram/internal/cloud/autosync"
 	"github.com/Gentleman-Programming/engram/internal/cloud/constants"
 	"github.com/Gentleman-Programming/engram/internal/cloud/remote"
+	"github.com/Gentleman-Programming/engram/internal/cloud/syncguidance"
 	"github.com/Gentleman-Programming/engram/internal/mcp"
 	"github.com/Gentleman-Programming/engram/internal/obsidian"
 	"github.com/Gentleman-Programming/engram/internal/project"
@@ -501,18 +502,26 @@ func markCloudSyncFailure(s *store.Store, targetKey string, syncErr error) {
 	if syncErr == nil {
 		return
 	}
+	message := cloudSyncFailureMessage(syncguidance.ProjectFromTargetKey(targetKey), syncErr)
 	var statusErr *remote.HTTPStatusError
 	if errors.As(syncErr, &statusErr) {
 		switch {
 		case statusErr.IsAuthFailure():
-			_ = s.MarkSyncAuthRequired(targetKey, syncErr.Error())
+			_ = s.MarkSyncAuthRequired(targetKey, message)
 			return
 		case statusErr.IsPolicyFailure():
-			_ = s.MarkSyncBlocked(targetKey, constants.ReasonPolicyForbidden, syncErr.Error())
+			_ = s.MarkSyncBlocked(targetKey, constants.ReasonPolicyForbidden, message)
 			return
 		}
 	}
-	_ = s.MarkSyncFailure(targetKey, syncErr.Error(), time.Now().UTC().Add(30*time.Second))
+	_ = s.MarkSyncFailure(targetKey, message, time.Now().UTC().Add(30*time.Second))
+}
+
+func cloudSyncFailureMessage(project string, syncErr error) string {
+	if syncErr == nil {
+		return ""
+	}
+	return syncguidance.AppendGuidance(syncErr.Error(), project, syncErr)
 }
 
 func main() {
@@ -1203,7 +1212,7 @@ func cmdSync(cfg store.Config) {
 			if !doStatus {
 				markCloudSyncFailure(s, cloudTargetKey, err)
 			}
-			fatal(err)
+			fatal(errors.New(cloudSyncFailureMessage(project, err)))
 		}
 		sy = engramsync.NewCloudWithTransport(s, transport, project)
 	}
@@ -1232,6 +1241,9 @@ func cmdSync(cfg store.Config) {
 		if err != nil {
 			if cloudEnabled {
 				markCloudSyncFailure(s, cloudTargetKey, err)
+			}
+			if cloudEnabled {
+				fatal(errors.New(cloudSyncFailureMessage(project, err)))
 			}
 			fatal(err)
 		}
@@ -1274,6 +1286,7 @@ func cmdSync(cfg store.Config) {
 	if err != nil {
 		if cloudEnabled {
 			markCloudSyncFailure(s, cloudTargetKey, err)
+			fatal(errors.New(cloudSyncFailureMessage(project, err)))
 		}
 		fatal(err)
 	}

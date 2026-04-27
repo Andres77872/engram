@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -21,6 +22,7 @@ type fakeLocalStore struct {
 	leaseOwner     string
 	pushErr        error
 	pullErr        error
+	failureMessage string
 	appliedMuts    []store.SyncMutation
 	acquireGranted bool
 	skipAckN       int64
@@ -99,7 +101,12 @@ func (s *fakeLocalStore) ApplyPulledMutation(_ string, mutation store.SyncMutati
 	return nil
 }
 
-func (s *fakeLocalStore) MarkSyncFailure(_, _ string, _ time.Time) error { return nil }
+func (s *fakeLocalStore) MarkSyncFailure(_, message string, _ time.Time) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.failureMessage = message
+	return nil
+}
 
 func (s *fakeLocalStore) MarkSyncHealthy(_ string) error { return nil }
 
@@ -114,6 +121,12 @@ type fakeCloudTransport struct {
 	pushResult *PushMutationsResult
 	pullResult *PullMutationsResponse
 }
+
+type fakeRepairableCloudError struct{ msg string }
+
+func (e fakeRepairableCloudError) Error() string { return e.msg }
+
+func (e fakeRepairableCloudError) IsRepairable() bool { return true }
 
 func newFakeTransport() *fakeCloudTransport {
 	return &fakeCloudTransport{
@@ -217,6 +230,46 @@ func TestManagerPullFailedPhase(t *testing.T) {
 		time.Sleep(5 * time.Millisecond)
 	}
 	t.Fatalf("expected PhasePullFailed, got %q", mgr.Status().Phase)
+}
+
+func TestManagerRepairableFailureStoresUpgradeGuidance(t *testing.T) {
+	ls := newFakeLocalStore()
+	ls.mutations = []store.SyncMutation{{Seq: 1, Entity: "obs", EntityKey: "k1", Project: "proj-a"}}
+	tr := newFakeTransport()
+	tr.pushErr = fakeRepairableCloudError{msg: "invalid upsert payload: observations[0].directory is required"}
+	cfg := DefaultConfig()
+	cfg.TargetKey = "cloud:proj-a"
+
+	mgr := New(ls, tr, cfg)
+	mgr.cycle(context.Background())
+
+	status := mgr.Status()
+	if status.Phase != PhasePushFailed {
+		t.Fatalf("expected PhasePushFailed, got %q", status.Phase)
+	}
+	if !strings.Contains(status.LastError, "invalid upsert payload") {
+		t.Fatalf("expected original error to be preserved, got %q", status.LastError)
+	}
+	for _, want := range []string{
+		"Known repairable cloud sync failure detected.",
+		"engram cloud upgrade doctor --project proj-a",
+		"engram cloud upgrade repair --project proj-a --dry-run",
+		"engram cloud upgrade repair --project proj-a --apply",
+		"engram sync --cloud --project proj-a",
+	} {
+		if !strings.Contains(status.LastError, want) {
+			t.Fatalf("expected status.LastError to contain %q, got %q", want, status.LastError)
+		}
+		if !strings.Contains(ls.failureMessage, want) {
+			t.Fatalf("expected stored failure to contain %q, got %q", want, ls.failureMessage)
+		}
+	}
+	if strings.Contains(status.LastError, "--auto-repair") || strings.Contains(ls.failureMessage, "--auto-repair") {
+		t.Fatalf("guidance must not mention auto-repair, status=%q stored=%q", status.LastError, ls.failureMessage)
+	}
+	if atomic.LoadInt32(&tr.pushCalls) != 1 {
+		t.Fatalf("expected one push attempt and no repair execution path, got %d", tr.pushCalls)
+	}
 }
 
 func TestManagerStopForUpgradeDisabled(t *testing.T) {

@@ -25,6 +25,7 @@ import (
 	"time"
 
 	"github.com/Gentleman-Programming/engram/internal/cloud/constants"
+	"github.com/Gentleman-Programming/engram/internal/cloud/syncguidance"
 	"github.com/Gentleman-Programming/engram/internal/store"
 )
 
@@ -388,13 +389,13 @@ func (m *Manager) cycle(ctx context.Context) {
 	// Push, then pull.
 	if err := m.push(ctx); err != nil {
 		reasonCode := classifyTransportError(err)
-		m.recordFailureWithReason(fmt.Sprintf("push: %v", err), reasonCode)
+		m.recordFailureWithReason(autosyncFailureMessage(m.cfg.TargetKey, fmt.Sprintf("push: %v", err), err), reasonCode)
 		return
 	}
 
 	if err := m.pull(ctx); err != nil {
 		reasonCode := classifyTransportError(err)
-		m.recordFailureWithReason(fmt.Sprintf("pull: %v", err), reasonCode)
+		m.recordFailureWithReason(autosyncFailureMessage(m.cfg.TargetKey, fmt.Sprintf("pull: %v", err), err), reasonCode)
 		return
 	}
 
@@ -422,6 +423,14 @@ func classifyTransportError(err error) string {
 		}
 	}
 	return "transport_failed"
+}
+
+func autosyncFailureMessage(targetKey, message string, err error) string {
+	project := syncguidance.ProjectFromError(err)
+	if project == "" {
+		project = syncguidance.ProjectFromTargetKey(targetKey)
+	}
+	return syncguidance.AppendGuidance(message, project, err)
 }
 
 // unwrapTransportStatusError walks the error chain looking for transportStatusError.

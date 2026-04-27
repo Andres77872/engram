@@ -252,6 +252,17 @@ engram sync --cloud --project my-project
 ENGRAM_CLOUD_SYNC=1 engram sync --status --project my-project
 ```
 
+When `engram sync --cloud --project <project>` or autosync hits a known repairable cloud sync/upsert/canonicalization failure, Engram preserves the original error and appends guidance to run:
+
+```bash
+engram cloud upgrade doctor --project <project>
+engram cloud upgrade repair --project <project> --dry-run
+engram cloud upgrade repair --project <project> --apply
+engram sync --cloud --project <project>
+```
+
+Sync/autosync never auto-applies repairs; only the explicit `repair --apply` command mutates local repairable upgrade state.
+
 ### Local Cloud Bring-Up (Docker + Postgres)
 
 ```bash

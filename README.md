@@ -125,6 +125,7 @@ engram sync --cloud --project smoke-project
 ```
 
 Cloud mode is always project-scoped (`--project` is required; `engram sync --cloud --all` is intentionally blocked).
+Known repairable cloud sync/upsert/canonicalization failures keep the original error visible and recommend the explicit `doctor`/`repair` flow below; Engram never auto-applies repair from sync or autosync.
 
 **Upgrade flow for existing local databases** (diagnose → repair → bootstrap → status):
 
