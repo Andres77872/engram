@@ -133,6 +133,11 @@ func cmdCloud(cfg store.Config) {
 		fmt.Fprintln(os.Stderr, "supported subcommands: status, enroll, config, serve, upgrade")
 		exitFunc(1)
 	}
+	if os.Args[2] == "--help" || os.Args[2] == "-h" || os.Args[2] == "help" {
+		fmt.Println("usage: engram cloud <subcommand> [options]")
+		fmt.Println("supported subcommands: status, enroll, config, serve, upgrade")
+		return
+	}
 
 	switch os.Args[2] {
 	case "status":
@@ -559,6 +564,14 @@ func cmdCloudStatus(cfg store.Config) {
 }
 
 func cmdCloudEnroll(cfg store.Config) {
+	if len(os.Args) >= 4 {
+		arg := strings.TrimSpace(os.Args[3])
+		if arg == "--help" || arg == "-h" || arg == "help" {
+			fmt.Println("usage: engram cloud enroll <project>")
+			fmt.Println("Enroll a local-first project for explicit cloud replication.")
+			return
+		}
+	}
 	if len(os.Args) < 4 || strings.TrimSpace(os.Args[3]) == "" {
 		fmt.Fprintln(os.Stderr, "usage: engram cloud enroll <project>")
 		exitFunc(1)

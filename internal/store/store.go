@@ -434,6 +434,13 @@ func (r sqlRowScanner) Close() error {
 	return r.rows.Close()
 }
 
+func closeRowsWithError(rows rowScanner, err error) error {
+	if closeErr := rows.Close(); closeErr != nil {
+		return errors.Join(err, closeErr)
+	}
+	return err
+}
+
 type storeHooks struct {
 	exec    func(db execer, query string, args ...any) (sql.Result, error)
 	query   func(db queryer, query string, args ...any) (*sql.Rows, error)
@@ -518,6 +525,7 @@ func New(cfg Config) (*Store, error) {
 	if err != nil {
 		return nil, fmt.Errorf("engram: open database: %w", err)
 	}
+	db.SetMaxOpenConns(1)
 
 	// SQLite performance pragmas
 	pragmas := []string{
@@ -558,6 +566,7 @@ func newWithoutRepair(cfg Config) (*Store, error) {
 	if err != nil {
 		return nil, fmt.Errorf("engram: open database: %w", err)
 	}
+	db.SetMaxOpenConns(1)
 
 	pragmas := []string{
 		"PRAGMA journal_mode = WAL",
@@ -3973,34 +3982,51 @@ func (s *Store) MergeProjects(sources []string, canonical string) (*MergeResult,
 	result := &MergeResult{Canonical: canonical}
 
 	err := s.withTx(func(tx *sql.Tx) error {
-		for _, src := range sources {
-			src, _ = NormalizeProject(src)
-			if src == "" || src == canonical {
+		seenSources := make(map[string]struct{})
+		for _, srcInput := range sources {
+			srcNormalized, _ := NormalizeProject(srcInput)
+			if srcNormalized == "" || srcNormalized == canonical {
+				continue
+			}
+			if _, seen := seenSources[srcNormalized]; seen {
+				continue
+			}
+			seenSources[srcNormalized] = struct{}{}
+
+			sourceVariants := projectMergeSourceVariants(srcInput, srcNormalized, canonical)
+			if len(sourceVariants) == 0 {
 				continue
 			}
 
-			res, err := s.execHook(tx, `UPDATE observations SET project = ? WHERE project = ?`, canonical, src)
+			placeholders := sqlPlaceholders(len(sourceVariants))
+			args := make([]any, 0, len(sourceVariants)+1)
+			args = append(args, canonical)
+			for _, variant := range sourceVariants {
+				args = append(args, variant)
+			}
+
+			res, err := s.execHook(tx, `UPDATE observations SET project = ? WHERE project IN (`+placeholders+`)`, args...)
 			if err != nil {
-				return fmt.Errorf("merge observations %q → %q: %w", src, canonical, err)
+				return fmt.Errorf("merge observations %q → %q: %w", srcNormalized, canonical, err)
 			}
 			n, _ := res.RowsAffected()
 			result.ObservationsUpdated += n
 
-			res, err = s.execHook(tx, `UPDATE sessions SET project = ? WHERE project = ?`, canonical, src)
+			res, err = s.execHook(tx, `UPDATE sessions SET project = ? WHERE project IN (`+placeholders+`)`, args...)
 			if err != nil {
-				return fmt.Errorf("merge sessions %q → %q: %w", src, canonical, err)
+				return fmt.Errorf("merge sessions %q → %q: %w", srcNormalized, canonical, err)
 			}
 			n, _ = res.RowsAffected()
 			result.SessionsUpdated += n
 
-			res, err = s.execHook(tx, `UPDATE user_prompts SET project = ? WHERE project = ?`, canonical, src)
+			res, err = s.execHook(tx, `UPDATE user_prompts SET project = ? WHERE project IN (`+placeholders+`)`, args...)
 			if err != nil {
-				return fmt.Errorf("merge prompts %q → %q: %w", src, canonical, err)
+				return fmt.Errorf("merge prompts %q → %q: %w", srcNormalized, canonical, err)
 			}
 			n, _ = res.RowsAffected()
 			result.PromptsUpdated += n
 
-			result.SourcesMerged = append(result.SourcesMerged, src)
+			result.SourcesMerged = append(result.SourcesMerged, srcNormalized)
 		}
 		// Enqueue sync mutations so cloud sync picks up the merged records.
 		// Same pattern used by EnrollProject.
@@ -4011,6 +4037,45 @@ func (s *Store) MergeProjects(sources []string, canonical string) (*MergeResult,
 	}
 
 	return result, nil
+}
+
+// sqlPlaceholders returns a comma-separated list of parameter markers only.
+// Values are still passed separately through query arguments; no user data is
+// interpolated into SQL here.
+func sqlPlaceholders(count int) string {
+	return strings.TrimRight(strings.Repeat("?,", count), ",")
+}
+
+func projectMergeSourceVariants(rawSource, normalizedSource, canonical string) []string {
+	seen := make(map[string]struct{})
+	variants := make([]string, 0, 5)
+	// Match both the historical raw project name and its normalized form so
+	// legacy rows are migrated without reintroducing canonical-source churn.
+	candidates := []string{strings.TrimSpace(rawSource), normalizedSource}
+	parts := strings.FieldsFunc(normalizedSource, func(r rune) bool {
+		return r == ' ' || r == '-' || r == '_'
+	})
+	if len(parts) > 1 {
+		for _, sep := range []string{" ", "-", "_"} {
+			candidates = append(candidates, strings.Join(parts, sep))
+		}
+	}
+	for _, candidate := range candidates {
+		candidate = strings.TrimSpace(candidate)
+		if candidate == "" || candidate == canonical {
+			continue
+		}
+		candidateNormalized, _ := NormalizeProject(candidate)
+		if candidateNormalized == canonical {
+			continue
+		}
+		if _, ok := seen[candidate]; ok {
+			continue
+		}
+		seen[candidate] = struct{}{}
+		variants = append(variants, candidate)
+	}
+	return variants
 }
 
 // ─── Project Pruning ─────────────────────────────────────────────────────────
@@ -4199,12 +4264,13 @@ func (s *Store) repairEnrolledProjectSyncMutations() error {
 	for rows.Next() {
 		var project string
 		if err := rows.Scan(&project); err != nil {
-			rows.Close()
-			return err
+			return closeRowsWithError(rows, err)
 		}
 		projects = append(projects, project)
 	}
-	rows.Close()
+	if err := rows.Close(); err != nil {
+		return err
+	}
 	if err := rows.Err(); err != nil {
 		return err
 	}
@@ -4255,12 +4321,13 @@ func (s *Store) backfillSessionSyncMutationsTx(tx *sql.Tx, project string) error
 	for rows.Next() {
 		var payload syncSessionPayload
 		if err := rows.Scan(&payload.ID, &payload.Project, &payload.Directory, &payload.StartedAt, &payload.EndedAt, &payload.Summary); err != nil {
-			rows.Close()
-			return err
+			return closeRowsWithError(rows, err)
 		}
 		pending = append(pending, payload)
 	}
-	rows.Close()
+	if err := rows.Close(); err != nil {
+		return err
+	}
 	if err := rows.Err(); err != nil {
 		return err
 	}
@@ -4321,12 +4388,13 @@ func (s *Store) backfillObservationSyncMutationsTx(tx *sql.Tx, project string) e
 			&payload.CreatedAt,
 			&payload.UpdatedAt,
 		); err != nil {
-			rows.Close()
-			return err
+			return closeRowsWithError(rows, err)
 		}
 		pending = append(pending, payload)
 	}
-	rows.Close()
+	if err := rows.Close(); err != nil {
+		return err
+	}
 	if err := rows.Err(); err != nil {
 		return err
 	}
@@ -4369,14 +4437,15 @@ func (s *Store) backfillObservationSyncMutationsTx(tx *sql.Tx, project string) e
 	for deletedRows.Next() {
 		var payload syncObservationPayload
 		if err := deletedRows.Scan(&payload.SyncID, &payload.SessionID, &payload.Project, &payload.DeletedAt); err != nil {
-			deletedRows.Close()
-			return err
+			return closeRowsWithError(deletedRows, err)
 		}
 		payload.Deleted = true
 		payload.HardDelete = false
 		deletedPending = append(deletedPending, payload)
 	}
-	deletedRows.Close()
+	if err := deletedRows.Close(); err != nil {
+		return err
+	}
 	if err := deletedRows.Err(); err != nil {
 		return err
 	}
@@ -4420,12 +4489,13 @@ func (s *Store) backfillPromptSyncMutationsTx(tx *sql.Tx, project string) error 
 	for rows.Next() {
 		var payload syncPromptPayload
 		if err := rows.Scan(&payload.SyncID, &payload.SessionID, &payload.Content, &payload.Project, &payload.CreatedAt); err != nil {
-			rows.Close()
-			return err
+			return closeRowsWithError(rows, err)
 		}
 		pending = append(pending, payload)
 	}
-	rows.Close()
+	if err := rows.Close(); err != nil {
+		return err
+	}
 	if err := rows.Err(); err != nil {
 		return err
 	}
@@ -4467,14 +4537,15 @@ func (s *Store) backfillPromptSyncMutationsTx(tx *sql.Tx, project string) error 
 	for tombstoneRows.Next() {
 		var payload syncPromptPayload
 		if err := tombstoneRows.Scan(&payload.SyncID, &payload.SessionID, &payload.Project, &payload.DeletedAt); err != nil {
-			tombstoneRows.Close()
-			return err
+			return closeRowsWithError(tombstoneRows, err)
 		}
 		payload.Deleted = true
 		payload.HardDelete = true
 		tombstonePending = append(tombstonePending, payload)
 	}
-	tombstoneRows.Close()
+	if err := tombstoneRows.Close(); err != nil {
+		return err
+	}
 	if err := tombstoneRows.Err(); err != nil {
 		return err
 	}
@@ -4985,7 +5056,6 @@ func (s *Store) addColumnIfNotExists(tableName, columnName, definition string) e
 	if err != nil {
 		return err
 	}
-	defer rows.Close()
 
 	for rows.Next() {
 		var cid int
@@ -4994,13 +5064,18 @@ func (s *Store) addColumnIfNotExists(tableName, columnName, definition string) e
 		var defaultValue any
 		var pk int
 		if err := rows.Scan(&cid, &name, &typ, &notNull, &defaultValue, &pk); err != nil {
-			return err
+			return closeRowsWithError(rows, err)
 		}
 		if name == columnName {
+			rows.Close()
 			return nil
 		}
 	}
 	if err := rows.Err(); err != nil {
+		rows.Close()
+		return err
+	}
+	if err := rows.Close(); err != nil {
 		return err
 	}
 
@@ -5013,7 +5088,6 @@ func (s *Store) migrateSyncChunksTable() error {
 	if err != nil {
 		return err
 	}
-	defer rows.Close()
 
 	hasTargetKey := false
 	targetKeyPK := 0
@@ -5025,7 +5099,7 @@ func (s *Store) migrateSyncChunksTable() error {
 		var defaultValue any
 		var pk int
 		if err := rows.Scan(&cid, &name, &typ, &notNull, &defaultValue, &pk); err != nil {
-			return err
+			return closeRowsWithError(rows, err)
 		}
 		switch name {
 		case "target_key":
@@ -5036,6 +5110,10 @@ func (s *Store) migrateSyncChunksTable() error {
 		}
 	}
 	if err := rows.Err(); err != nil {
+		rows.Close()
+		return err
+	}
+	if err := rows.Close(); err != nil {
 		return err
 	}
 
@@ -5099,7 +5177,6 @@ func (s *Store) migrateLegacyObservationsTable() error {
 	if err != nil {
 		return err
 	}
-	defer rows.Close()
 
 	var hasID bool
 	var idIsPrimaryKey bool
@@ -5110,7 +5187,7 @@ func (s *Store) migrateLegacyObservationsTable() error {
 		var defaultValue any
 		var pk int
 		if err := rows.Scan(&cid, &name, &typ, &notNull, &defaultValue, &pk); err != nil {
-			return err
+			return closeRowsWithError(rows, err)
 		}
 		if name == "id" {
 			hasID = true
@@ -5119,6 +5196,10 @@ func (s *Store) migrateLegacyObservationsTable() error {
 		}
 	}
 	if err := rows.Err(); err != nil {
+		rows.Close()
+		return err
+	}
+	if err := rows.Close(); err != nil {
 		return err
 	}
 

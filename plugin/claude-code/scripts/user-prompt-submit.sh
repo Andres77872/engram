@@ -23,6 +23,43 @@ CWD=$(echo "$INPUT" | jq -r '.cwd // empty')
 SESSION_ID=$(echo "$INPUT" | jq -r '.session_id // empty')
 PROJECT=$(detect_project "$CWD")
 
+parse_epoch() {
+  TS="$1"
+  if [ -z "$TS" ]; then
+    return 1
+  fi
+
+  # Drop fractional seconds without dropping timezone information.
+  if [[ "$TS" == *.* ]]; then
+    TS_PREFIX="${TS%%.*}"
+    TS_SUFFIX="${TS#*.}"
+    case "$TS_SUFFIX" in
+      *Z) TS="${TS_PREFIX}Z" ;;
+      *+*) TS="${TS_PREFIX}+${TS_SUFFIX#*+}" ;;
+      *-*) TS="${TS_PREFIX}-${TS_SUFFIX#*-}" ;;
+      *) TS="$TS_PREFIX" ;;
+    esac
+  fi
+
+  # BSD date accepts numeric RFC3339 offsets with %z, but requires +HHMM.
+  if [[ "$TS" =~ ^([0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2})([+-][0-9]{2}):([0-9]{2})$ ]]; then
+    TZ_TS="${BASH_REMATCH[1]}${BASH_REMATCH[2]}${BASH_REMATCH[3]}"
+    date -j -f "%Y-%m-%dT%H:%M:%S%z" "$TZ_TS" "+%s" 2>/dev/null && return 0
+  fi
+  if [[ "$TS" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}[+-][0-9]{4}$ ]]; then
+    date -j -f "%Y-%m-%dT%H:%M:%S%z" "$TS" "+%s" 2>/dev/null && return 0
+  fi
+
+  if [[ "$TS" == *Z ]]; then
+    Z_TS="${TS%Z}"
+    date -j -u -f "%Y-%m-%dT%H:%M:%S" "$Z_TS" "+%s" 2>/dev/null && return 0
+  fi
+
+  date -j -f "%Y-%m-%dT%H:%M:%S" "$TS" "+%s" 2>/dev/null \
+    || date -j -f "%Y-%m-%d %H:%M:%S" "$TS" "+%s" 2>/dev/null \
+    || date -d "$TS" "+%s" 2>/dev/null
+}
+
 # Default: no injection
 OUTPUT="{}"
 
@@ -77,9 +114,11 @@ fi
 
 # Check session age — skip nudge if session is new (< 5 minutes)
 if [ -n "$SESSION_START" ]; then
-  SESSION_START_EPOCH=$(date -j -f "%Y-%m-%dT%H:%M:%S" "${SESSION_START%%.*}" "+%s" 2>/dev/null \
-    || date -d "${SESSION_START%%.*}" "+%s" 2>/dev/null \
-    || echo "0")
+  SESSION_START_EPOCH=$(parse_epoch "$SESSION_START")
+  if [ -z "$SESSION_START_EPOCH" ]; then
+    echo "$OUTPUT"
+    exit 0
+  fi
   NOW_EPOCH=$(date "+%s")
   SESSION_AGE_SECS=$(( NOW_EPOCH - SESSION_START_EPOCH ))
 
@@ -111,9 +150,11 @@ if [ -z "$LAST_SAVE_AT" ]; then
 fi
 
 # Parse last save timestamp and compare to now
-LAST_EPOCH=$(date -j -f "%Y-%m-%dT%H:%M:%S" "${LAST_SAVE_AT%%.*}" "+%s" 2>/dev/null \
-  || date -d "${LAST_SAVE_AT%%.*}" "+%s" 2>/dev/null \
-  || echo "0")
+LAST_EPOCH=$(parse_epoch "$LAST_SAVE_AT")
+if [ -z "$LAST_EPOCH" ]; then
+  echo "$OUTPUT"
+  exit 0
+fi
 NOW_EPOCH=$(date "+%s")
 ELAPSED=$(( NOW_EPOCH - LAST_EPOCH ))
 
