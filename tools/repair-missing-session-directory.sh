@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 # Temporary/manual rescue helper for legacy Engram Cloud upgrade data.
 #
-# This script patches one legacy `sync_mutations` row whose `session` upsert
-# payload is missing `directory`, producing the doctor error:
+# This script patches one legacy `sync_mutations` row whose upsert payload is
+# missing required fields, producing doctor errors such as:
 #   session payload directory is required and cannot be inferred from local state (seq=N entity=session op=upsert)
+#   observation payload missing required upsert fields: title (seq=N entity=observation op=upsert)
 #
 # It is intentionally conservative: dry-run is the default, `--apply` creates a
 # timestamped SQLite backup, and it never touches `last_acked_seq` or deletes
@@ -14,16 +15,22 @@ set -eu
 
 usage() {
   cat <<'USAGE'
-Usage: repair-missing-session-directory.sh [--apply] [--seq N] PROJECT [DIRECTORY]
+Usage: repair-missing-session-directory.sh [--apply] [--interactive] [--seq N] PROJECT [DIRECTORY]
 
-Safely patch a legacy session sync mutation payload to add `directory`.
+Safely patch one legacy sync mutation payload:
+  - session upsert missing `directory`
+  - observation upsert missing required payload fields from local `observations`
 
 Arguments:
   PROJECT     Required Engram project name passed to cloud upgrade doctor.
-  DIRECTORY   Optional session directory. Defaults to git root, then pwd.
+  DIRECTORY   Optional session directory for session repairs. Defaults to git
+              root, then pwd. Accepted but not required for observation repairs.
 
 Flags:
   --apply     Write changes. Default is dry-run and does not modify the DB.
+  --interactive
+              Prompt for missing observation fields after local inference fails.
+              Without this flag, incomplete observation repairs stay blocked.
   --seq N     Use a known sync_mutations.seq instead of parsing doctor output.
   -h, --help  Show this help.
 
@@ -51,6 +58,41 @@ sql_escape() {
   # SQLite string literal escaping: single quote becomes two single quotes.
   # Usage: printf "'%s'" "$(sql_escape "$value")"
   printf "%s" "$1" | sed "s/'/''/g"
+}
+
+single_line_excerpt() {
+  # Keep prompts compact and avoid multiline terminal surprises.
+  printf '%s' "$1" | tr '\r\n\t' '   ' | cut -c 1-300
+}
+
+prompt_value() {
+  field=$1
+  label=$2
+  default_value=$3
+  required=$4
+
+  while :; do
+    if [ "$default_value" ]; then
+      printf '%s [%s]: ' "$label" "$default_value" >&2
+    else
+      printf '%s: ' "$label" >&2
+    fi
+
+    if ! IFS= read -r answer; then
+      die "interactive input ended before $field was provided"
+    fi
+
+    if [ ! "$answer" ] && [ "$default_value" ]; then
+      answer=$default_value
+    fi
+
+    if [ "$answer" ] || [ "$required" != "1" ]; then
+      printf '%s\n' "$answer"
+      return 0
+    fi
+
+    printf 'error: %s is required and must not be empty.\n' "$field" >&2
+  done
 }
 
 abs_path_if_possible() {
@@ -101,23 +143,43 @@ have_column() {
   [ "$(sqlite_scalar "SELECT COUNT(*) FROM pragma_table_info('$(sql_escape "$1")') WHERE name = '$(sql_escape "$2")';")" = "1" ]
 }
 
-parse_seq_from_doctor() {
+parse_target_from_doctor() {
   output_file=$1
   if ! engram cloud upgrade doctor --project "$PROJECT" >"$output_file" 2>&1; then
     : # doctor is expected to fail for the legacy mutation this helper repairs.
   fi
-  parsed=$(sed -n 's/.*seq=\([0-9][0-9]*\) entity=session op=upsert.*/\1/p' "$output_file" | sed -n '1p')
+  parsed=$(sed -n \
+    -e 's/.*seq=\([0-9][0-9]*\) entity=session op=upsert.*/\1 session/p' \
+    -e 's/.*seq=\([0-9][0-9]*\) entity=observation op=upsert.*/\1 observation/p' \
+    "$output_file" | sed -n '1p')
   [ "$parsed" ] || return 1
   printf '%s\n' "$parsed"
 }
 
+json_required_count_sql() {
+  printf "%s" "(
+    CASE WHEN ifnull(json_extract(payload, '$.sync_id'), '') = '' THEN 1 ELSE 0 END +
+    CASE WHEN ifnull(json_extract(payload, '$.session_id'), '') = '' THEN 1 ELSE 0 END +
+    CASE WHEN ifnull(json_extract(payload, '$.type'), '') = '' THEN 1 ELSE 0 END +
+    CASE WHEN ifnull(json_extract(payload, '$.title'), '') = '' THEN 1 ELSE 0 END +
+    CASE WHEN ifnull(json_extract(payload, '$.content'), '') = '' THEN 1 ELSE 0 END +
+    CASE WHEN ifnull(json_extract(payload, '$.scope'), '') = '' THEN 1 ELSE 0 END
+  )"
+}
+
 APPLY=0
+INTERACTIVE=0
 SEQ=""
+ENTITY=""
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --apply)
       APPLY=1
+      shift
+      ;;
+    --interactive)
+      INTERACTIVE=1
       shift
       ;;
     --seq)
@@ -155,16 +217,6 @@ esac
 
 require_cmd sqlite3
 
-if [ "$DIRECTORY_ARG" ]; then
-  DIRECTORY=$(abs_path_if_possible "$DIRECTORY_ARG")
-elif command -v git >/dev/null 2>&1 && git_root=$(git rev-parse --show-toplevel 2>/dev/null); then
-  DIRECTORY=$git_root
-else
-  DIRECTORY=$(pwd)
-fi
-
-is_absoluteish_directory "$DIRECTORY" || die "directory must be absolute-ish (/..., /c/..., or C:/...): $DIRECTORY"
-
 DB=$(db_path)
 [ -f "$DB" ] || die "SQLite DB not found: $DB (override with ENGRAM_DB=/path/to/engram.db)"
 
@@ -174,63 +226,88 @@ if [ ! "$SEQ" ]; then
   require_cmd engram
   tmp=${TMPDIR:-/tmp}/engram-doctor-output.$$.txt
   trap 'rm -f "$tmp"' EXIT HUP INT TERM
-  if ! SEQ=$(parse_seq_from_doctor "$tmp"); then
+  if ! target=$(parse_target_from_doctor "$tmp"); then
     cat "$tmp" >&2 || true
-    die "could not parse 'seq=N entity=session op=upsert' from doctor output; rerun with --seq N"
+    die "could not parse 'seq=N entity=session op=upsert' or 'seq=N entity=observation op=upsert' from doctor output; rerun with --seq N"
   fi
+  SEQ=${target%% *}
+  ENTITY=${target#* }
 fi
 
 PROJECT_SQL=$(sql_escape "$PROJECT")
-DIRECTORY_SQL=$(sql_escape "$DIRECTORY")
 SEQ_SQL=$(sql_escape "$SEQ")
 
-row_count=$(sqlite_scalar "SELECT COUNT(*) FROM sync_mutations WHERE seq = CAST('$SEQ_SQL' AS INTEGER) AND entity = 'session' AND op = 'upsert';")
-[ "$row_count" = "1" ] || die "expected exactly one sync_mutations row for seq=$SEQ entity=session op=upsert, found $row_count"
-
-payload_project=$(sqlite_scalar "SELECT ifnull(json_extract(payload, '$.project'), '') FROM sync_mutations WHERE seq = CAST('$SEQ_SQL' AS INTEGER) AND entity = 'session' AND op = 'upsert';")
-[ "$payload_project" = "$PROJECT" ] || die "payload project mismatch for seq=$SEQ: got '$payload_project', want '$PROJECT'"
-
-existing_directory=$(sqlite_scalar "SELECT ifnull(json_extract(payload, '$.directory'), '') FROM sync_mutations WHERE seq = CAST('$SEQ_SQL' AS INTEGER) AND entity = 'session' AND op = 'upsert';")
-[ ! "$existing_directory" ] || die "payload already has directory for seq=$SEQ: $existing_directory"
-
-session_id=$(sqlite_scalar "SELECT coalesce(nullif(json_extract(payload, '$.id'), ''), nullif(entity_key, '')) FROM sync_mutations WHERE seq = CAST('$SEQ_SQL' AS INTEGER) AND entity = 'session' AND op = 'upsert';")
-[ "$session_id" ] || die "payload id/entity_key is required for seq=$SEQ"
-SESSION_ID_SQL=$(sql_escape "$session_id")
-
-current_payload=$(sqlite_scalar "SELECT payload FROM sync_mutations WHERE seq = CAST('$SEQ_SQL' AS INTEGER) AND entity = 'session' AND op = 'upsert';")
-patched_payload=$(sqlite_scalar "SELECT json_set(payload, '$.directory', '$DIRECTORY_SQL') FROM sync_mutations WHERE seq = CAST('$SEQ_SQL' AS INTEGER) AND entity = 'session' AND op = 'upsert';")
-
-info "Preview"
-info "-------"
-info "DB path: $DB"
-info "Project: $PROJECT"
-info "Seq: $SEQ"
-info "Session id: $session_id"
-info "Directory: $DIRECTORY"
-info ""
-info "Current payload:"
-printf '%s\n' "$current_payload"
-info ""
-info "Patched payload:"
-printf '%s\n' "$patched_payload"
-info ""
-info "Matching mutation row:"
-if have_column sync_mutations project; then
-  sqlite_box "SELECT seq, entity, entity_key, op, ifnull(project, '') AS row_project FROM sync_mutations WHERE seq = CAST('$SEQ_SQL' AS INTEGER);" || true
-else
-  sqlite_box "SELECT seq, entity, entity_key, op FROM sync_mutations WHERE seq = CAST('$SEQ_SQL' AS INTEGER);" || true
+if [ ! "$ENTITY" ]; then
+  row_count=$(sqlite_scalar "SELECT COUNT(*) FROM sync_mutations WHERE seq = CAST('$SEQ_SQL' AS INTEGER) AND entity IN ('session', 'observation') AND op = 'upsert';")
+  [ "$row_count" = "1" ] || die "expected exactly one sync_mutations row for seq=$SEQ entity=session|observation op=upsert, found $row_count"
+  ENTITY=$(sqlite_scalar "SELECT entity FROM sync_mutations WHERE seq = CAST('$SEQ_SQL' AS INTEGER) AND entity IN ('session', 'observation') AND op = 'upsert';")
 fi
 
-if [ "$APPLY" -ne 1 ]; then
-  info ""
-  info "Dry-run only: no database changes were made. Re-run with --apply to write."
-else
-  backup="$DB.repair-missing-session-directory.$(date +%Y%m%d%H%M%S).bak"
-  cp "$DB" "$backup"
-  info ""
-  info "Backup created: $backup"
+case "$ENTITY" in
+  session | observation) ;;
+  *) die "unsupported entity for seq=$SEQ: $ENTITY" ;;
+esac
 
-  sqlite3 -batch "$DB" "BEGIN;
+row_count=$(sqlite_scalar "SELECT COUNT(*) FROM sync_mutations WHERE seq = CAST('$SEQ_SQL' AS INTEGER) AND entity = '$ENTITY' AND op = 'upsert';")
+[ "$row_count" = "1" ] || die "expected exactly one sync_mutations row for seq=$SEQ entity=$ENTITY op=upsert, found $row_count"
+
+payload_project=$(sqlite_scalar "SELECT ifnull(json_extract(payload, '$.project'), '') FROM sync_mutations WHERE seq = CAST('$SEQ_SQL' AS INTEGER) AND entity = '$ENTITY' AND op = 'upsert';")
+[ "$payload_project" = "$PROJECT" ] || die "payload project mismatch for seq=$SEQ: got '$payload_project', want '$PROJECT'"
+
+if [ "$ENTITY" = "session" ]; then
+  if [ "$DIRECTORY_ARG" ]; then
+    DIRECTORY=$(abs_path_if_possible "$DIRECTORY_ARG")
+  elif command -v git >/dev/null 2>&1 && git_root=$(git rev-parse --show-toplevel 2>/dev/null); then
+    DIRECTORY=$git_root
+  else
+    DIRECTORY=$(pwd)
+  fi
+
+  is_absoluteish_directory "$DIRECTORY" || die "directory must be absolute-ish (/..., /c/..., or C:/...): $DIRECTORY"
+  DIRECTORY_SQL=$(sql_escape "$DIRECTORY")
+
+  existing_directory=$(sqlite_scalar "SELECT ifnull(json_extract(payload, '$.directory'), '') FROM sync_mutations WHERE seq = CAST('$SEQ_SQL' AS INTEGER) AND entity = 'session' AND op = 'upsert';")
+  [ ! "$existing_directory" ] || die "payload already has directory for seq=$SEQ: $existing_directory"
+
+  session_id=$(sqlite_scalar "SELECT coalesce(nullif(json_extract(payload, '$.id'), ''), nullif(entity_key, '')) FROM sync_mutations WHERE seq = CAST('$SEQ_SQL' AS INTEGER) AND entity = 'session' AND op = 'upsert';")
+  [ "$session_id" ] || die "payload id/entity_key is required for seq=$SEQ"
+  SESSION_ID_SQL=$(sql_escape "$session_id")
+
+  current_payload=$(sqlite_scalar "SELECT payload FROM sync_mutations WHERE seq = CAST('$SEQ_SQL' AS INTEGER) AND entity = 'session' AND op = 'upsert';")
+  patched_payload=$(sqlite_scalar "SELECT json_set(payload, '$.directory', '$DIRECTORY_SQL') FROM sync_mutations WHERE seq = CAST('$SEQ_SQL' AS INTEGER) AND entity = 'session' AND op = 'upsert';")
+
+  info "Preview"
+  info "-------"
+  info "DB path: $DB"
+  info "Project: $PROJECT"
+  info "Seq: $SEQ"
+  info "Entity: $ENTITY"
+  info "Session id: $session_id"
+  info "Directory: $DIRECTORY"
+  info ""
+  info "Current payload:"
+  printf '%s\n' "$current_payload"
+  info ""
+  info "Patched payload:"
+  printf '%s\n' "$patched_payload"
+  info ""
+  info "Matching mutation row:"
+  if have_column sync_mutations project; then
+    sqlite_box "SELECT seq, entity, entity_key, op, ifnull(project, '') AS row_project FROM sync_mutations WHERE seq = CAST('$SEQ_SQL' AS INTEGER);" || true
+  else
+    sqlite_box "SELECT seq, entity, entity_key, op FROM sync_mutations WHERE seq = CAST('$SEQ_SQL' AS INTEGER);" || true
+  fi
+
+  if [ "$APPLY" -ne 1 ]; then
+    info ""
+    info "Dry-run only: no database changes were made. Re-run with --apply to write."
+  else
+    backup="$DB.repair-missing-session-directory.$(date +%Y%m%d%H%M%S).bak"
+    cp "$DB" "$backup"
+    info ""
+    info "Backup created: $backup"
+
+    sqlite3 -batch "$DB" "BEGIN;
 UPDATE sync_mutations
 SET payload = json_set(payload, '$.directory', '$DIRECTORY_SQL')
 WHERE seq = CAST('$SEQ_SQL' AS INTEGER)
@@ -240,16 +317,184 @@ WHERE seq = CAST('$SEQ_SQL' AS INTEGER)
   AND ifnull(json_extract(payload, '$.directory'), '') = '';
 COMMIT;"
 
-  if have_table sessions; then
-    sqlite3 -batch "$DB" "UPDATE sessions
+    if have_table sessions; then
+      sqlite3 -batch "$DB" "UPDATE sessions
 SET directory = '$DIRECTORY_SQL'
 WHERE id = '$SESSION_ID_SQL'
   AND ifnull(directory, '') = '';"
+    fi
+
+    verified_directory=$(sqlite_scalar "SELECT ifnull(json_extract(payload, '$.directory'), '') FROM sync_mutations WHERE seq = CAST('$SEQ_SQL' AS INTEGER) AND entity = 'session' AND op = 'upsert';")
+    [ "$verified_directory" = "$DIRECTORY" ] || die "verification failed: payload directory is '$verified_directory', want '$DIRECTORY'"
+    info "Apply complete: payload directory verified."
+  fi
+else
+  [ ! "$DIRECTORY_ARG" ] || info "Note: DIRECTORY argument is ignored for observation repairs."
+  have_table observations || die "observations table not found in DB: $DB"
+
+  payload_sync_id=$(sqlite_scalar "SELECT ifnull(json_extract(payload, '$.sync_id'), '') FROM sync_mutations WHERE seq = CAST('$SEQ_SQL' AS INTEGER) AND entity = 'observation' AND op = 'upsert';")
+  entity_key=$(sqlite_scalar "SELECT ifnull(entity_key, '') FROM sync_mutations WHERE seq = CAST('$SEQ_SQL' AS INTEGER) AND entity = 'observation' AND op = 'upsert';")
+  payload_session_id=$(sqlite_scalar "SELECT ifnull(json_extract(payload, '$.session_id'), '') FROM sync_mutations WHERE seq = CAST('$SEQ_SQL' AS INTEGER) AND entity = 'observation' AND op = 'upsert';")
+  payload_type=$(sqlite_scalar "SELECT ifnull(json_extract(payload, '$.type'), '') FROM sync_mutations WHERE seq = CAST('$SEQ_SQL' AS INTEGER) AND entity = 'observation' AND op = 'upsert';")
+  payload_title=$(sqlite_scalar "SELECT ifnull(json_extract(payload, '$.title'), '') FROM sync_mutations WHERE seq = CAST('$SEQ_SQL' AS INTEGER) AND entity = 'observation' AND op = 'upsert';")
+  payload_content=$(sqlite_scalar "SELECT ifnull(json_extract(payload, '$.content'), '') FROM sync_mutations WHERE seq = CAST('$SEQ_SQL' AS INTEGER) AND entity = 'observation' AND op = 'upsert';")
+  payload_scope=$(sqlite_scalar "SELECT ifnull(json_extract(payload, '$.scope'), '') FROM sync_mutations WHERE seq = CAST('$SEQ_SQL' AS INTEGER) AND entity = 'observation' AND op = 'upsert';")
+
+  observation_sync_id=${payload_sync_id:-$entity_key}
+  local_rowid=""
+  local_sync_id=""
+  local_session_id=""
+  local_type=""
+  local_title=""
+  local_content=""
+  local_scope=""
+
+  if [ "$observation_sync_id" ]; then
+    OBS_SYNC_ID_SQL=$(sql_escape "$observation_sync_id")
+    local_count=$(sqlite_scalar "SELECT COUNT(*) FROM observations WHERE sync_id = '$OBS_SYNC_ID_SQL';")
+    if [ "$local_count" != "0" ]; then
+      local_rowid=$(sqlite_scalar "SELECT id FROM observations WHERE sync_id = '$OBS_SYNC_ID_SQL' ORDER BY ifnull(updated_at, '') DESC, ifnull(created_at, '') DESC, id DESC LIMIT 1;")
+    fi
   fi
 
-  verified_directory=$(sqlite_scalar "SELECT ifnull(json_extract(payload, '$.directory'), '') FROM sync_mutations WHERE seq = CAST('$SEQ_SQL' AS INTEGER) AND entity = 'session' AND op = 'upsert';")
-  [ "$verified_directory" = "$DIRECTORY" ] || die "verification failed: payload directory is '$verified_directory', want '$DIRECTORY'"
-  info "Apply complete: payload directory verified."
+  if [ "$local_rowid" ]; then
+    LOCAL_ROWID_SQL=$(sql_escape "$local_rowid")
+    local_sync_id=$(sqlite_scalar "SELECT ifnull(sync_id, '') FROM observations WHERE id = CAST('$LOCAL_ROWID_SQL' AS INTEGER);")
+    local_session_id=$(sqlite_scalar "SELECT ifnull(session_id, '') FROM observations WHERE id = CAST('$LOCAL_ROWID_SQL' AS INTEGER);")
+    local_type=$(sqlite_scalar "SELECT ifnull(type, '') FROM observations WHERE id = CAST('$LOCAL_ROWID_SQL' AS INTEGER);")
+    local_title=$(sqlite_scalar "SELECT ifnull(title, '') FROM observations WHERE id = CAST('$LOCAL_ROWID_SQL' AS INTEGER);")
+    local_content=$(sqlite_scalar "SELECT ifnull(content, '') FROM observations WHERE id = CAST('$LOCAL_ROWID_SQL' AS INTEGER);")
+    local_scope=$(sqlite_scalar "SELECT ifnull(scope, '') FROM observations WHERE id = CAST('$LOCAL_ROWID_SQL' AS INTEGER);")
+  fi
+
+  final_sync_id=${payload_sync_id:-${entity_key:-$local_sync_id}}
+  final_session_id=${payload_session_id:-$local_session_id}
+  final_type=${payload_type:-$local_type}
+  final_title=${payload_title:-$local_title}
+  final_content=${payload_content:-$local_content}
+  final_scope=${payload_scope:-$local_scope}
+
+  excerpt_source=${payload_content:-$local_content}
+  content_excerpt=$(single_line_excerpt "$excerpt_source")
+
+  missing_after_inference=0
+  [ "$final_sync_id" ] || missing_after_inference=$((missing_after_inference + 1))
+  [ "$final_session_id" ] || missing_after_inference=$((missing_after_inference + 1))
+  [ "$final_type" ] || missing_after_inference=$((missing_after_inference + 1))
+  [ "$final_title" ] || missing_after_inference=$((missing_after_inference + 1))
+  [ "$final_content" ] || missing_after_inference=$((missing_after_inference + 1))
+  [ "$final_scope" ] || missing_after_inference=$((missing_after_inference + 1))
+
+  if [ "$missing_after_inference" -ne 0 ] && [ "$INTERACTIVE" -eq 1 ]; then
+    info "Manual observation completion needed"
+    info "------------------------------------"
+    info "Seq: $SEQ"
+    info "sync_id/entity_key: ${observation_sync_id:-<missing>}"
+    info "Session id: ${final_session_id:-<missing>}"
+    info "Content excerpt: ${content_excerpt:-<none>}"
+    info ""
+    info "Current payload:"
+    sqlite_scalar "SELECT payload FROM sync_mutations WHERE seq = CAST('$SEQ_SQL' AS INTEGER) AND entity = 'observation' AND op = 'upsert';"
+    info ""
+    info "Local observation row:"
+    if [ "$local_rowid" ]; then
+      sqlite_box "SELECT id, sync_id, session_id, type, title, content, project, scope FROM observations WHERE id = CAST('$LOCAL_ROWID_SQL' AS INTEGER);" || true
+    else
+      info "<not found>"
+    fi
+    info ""
+
+    [ "$final_sync_id" ] || final_sync_id=$(prompt_value "sync_id" "sync_id" "${payload_sync_id:-${entity_key:-$local_sync_id}}" 1)
+    [ "$final_session_id" ] || final_session_id=$(prompt_value "session_id" "session_id" "${payload_session_id:-$local_session_id}" 1)
+    [ "$final_type" ] || final_type=$(prompt_value "type" "type (press Enter for default)" "${local_type:-manual}" 1)
+    if [ ! "$final_title" ]; then
+      final_title=$(prompt_value "title" "title (content excerpt: ${content_excerpt:-<none>})" "" 1)
+    fi
+    if [ ! "$final_content" ]; then
+      [ "$content_excerpt" ] || info "Warning: no content excerpt is available; content must still be provided."
+      final_content=$(prompt_value "content" "content" "" 1)
+      content_excerpt=$(single_line_excerpt "$final_content")
+    fi
+    [ "$final_scope" ] || final_scope=$(prompt_value "scope" "scope (press Enter for default)" "${local_scope:-project}" 1)
+  fi
+
+  [ "$final_sync_id" ] && [ "$final_session_id" ] && [ "$final_type" ] && [ "$final_title" ] && [ "$final_content" ] && [ "$final_scope" ] || die "blocked: local observation cannot fill all required payload fields for seq=$SEQ; rerun with --interactive to provide sync_id, session_id, type, title, content, and scope"
+
+  FINAL_SYNC_ID_SQL=$(sql_escape "$final_sync_id")
+  FINAL_SESSION_ID_SQL=$(sql_escape "$final_session_id")
+  FINAL_TYPE_SQL=$(sql_escape "$final_type")
+  FINAL_TITLE_SQL=$(sql_escape "$final_title")
+  FINAL_CONTENT_SQL=$(sql_escape "$final_content")
+  FINAL_SCOPE_SQL=$(sql_escape "$final_scope")
+
+  patched_payload_sql="json_set(
+    payload,
+    '$.sync_id', '$FINAL_SYNC_ID_SQL',
+    '$.session_id', '$FINAL_SESSION_ID_SQL',
+    '$.type', '$FINAL_TYPE_SQL',
+    '$.title', '$FINAL_TITLE_SQL',
+    '$.content', '$FINAL_CONTENT_SQL',
+    '$.scope', '$FINAL_SCOPE_SQL'
+  )"
+
+  current_payload=$(sqlite_scalar "SELECT payload FROM sync_mutations WHERE seq = CAST('$SEQ_SQL' AS INTEGER) AND entity = 'observation' AND op = 'upsert';")
+  patched_payload=$(sqlite_scalar "SELECT $patched_payload_sql FROM sync_mutations WHERE seq = CAST('$SEQ_SQL' AS INTEGER) AND entity = 'observation' AND op = 'upsert';")
+
+  missing_after_patch=$(sqlite_scalar "WITH patched(payload) AS (SELECT $patched_payload_sql FROM sync_mutations WHERE seq = CAST('$SEQ_SQL' AS INTEGER) AND entity = 'observation' AND op = 'upsert') SELECT $(json_required_count_sql) FROM patched;")
+  [ "$missing_after_patch" = "0" ] || die "blocked: local observation cannot fill all required payload fields for seq=$SEQ; required fields sync_id, session_id, type, title, content, scope must be non-empty"
+
+  info "Preview"
+  info "-------"
+  info "DB path: $DB"
+  info "Project: $PROJECT"
+  info "Seq: $SEQ"
+  info "Entity: $ENTITY"
+  info "Observation sync_id: $observation_sync_id"
+  info "Local observation row id: $local_rowid"
+  info "Content excerpt: ${content_excerpt:-<none>}"
+  info ""
+  info "Current payload:"
+  printf '%s\n' "$current_payload"
+  info ""
+  info "Patched payload:"
+  printf '%s\n' "$patched_payload"
+  info ""
+  info "Local observation row:"
+  if [ "$local_rowid" ]; then
+    sqlite_box "SELECT id, sync_id, session_id, type, title, content, project, scope FROM observations WHERE id = CAST('$LOCAL_ROWID_SQL' AS INTEGER);" || true
+  else
+    info "<not found>"
+  fi
+  info ""
+  info "Matching mutation row:"
+  if have_column sync_mutations project; then
+    sqlite_box "SELECT seq, entity, entity_key, op, ifnull(project, '') AS row_project FROM sync_mutations WHERE seq = CAST('$SEQ_SQL' AS INTEGER);" || true
+  else
+    sqlite_box "SELECT seq, entity, entity_key, op FROM sync_mutations WHERE seq = CAST('$SEQ_SQL' AS INTEGER);" || true
+  fi
+
+  if [ "$APPLY" -ne 1 ]; then
+    info ""
+    info "Dry-run only: no database changes were made. Re-run with --apply to write."
+  else
+    backup="$DB.repair-missing-session-directory.$(date +%Y%m%d%H%M%S).bak"
+    cp "$DB" "$backup"
+    info ""
+    info "Backup created: $backup"
+
+    sqlite3 -batch "$DB" "BEGIN;
+UPDATE sync_mutations
+SET payload = $patched_payload_sql
+WHERE seq = CAST('$SEQ_SQL' AS INTEGER)
+  AND entity = 'observation'
+  AND op = 'upsert'
+  AND ifnull(json_extract(payload, '$.project'), '') = '$PROJECT_SQL';
+COMMIT;"
+
+    missing_after_apply=$(sqlite_scalar "SELECT $(json_required_count_sql) FROM sync_mutations WHERE seq = CAST('$SEQ_SQL' AS INTEGER) AND entity = 'observation' AND op = 'upsert';")
+    [ "$missing_after_apply" = "0" ] || die "verification failed: observation payload still has empty required fields"
+    info "Apply complete: observation payload required fields verified."
+  fi
 fi
 
 info ""

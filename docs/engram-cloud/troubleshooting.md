@@ -82,7 +82,7 @@ In `v1.14.8`, the server treats the client `chunk_id` as advisory. The server va
 
 ---
 
-## Error: `session payload directory is required`
+## Error: `session payload directory is required` or observation payload fields are missing
 
 This is the common legacy manual-save blocker:
 
@@ -90,24 +90,43 @@ This is the common legacy manual-save blocker:
 session payload directory is required and cannot be inferred from local state (seq=N entity=session op=upsert)
 ```
 
-It means a historical `session` mutation in `sync_mutations` is missing `directory`. Newer Engram versions write this field correctly, but old journal rows may still need repair before first cloud upload.
+Another legacy blocker can appear for observation upserts:
+
+```text
+observation payload missing required upsert fields: title (seq=N entity=observation op=upsert)
+canonicalize cloud chunk: mutations[768]: observation payload title is required for upsert
+```
+
+It means a historical `session` mutation in `sync_mutations` is missing `directory`, or a historical `observation` mutation is missing one of the required upsert fields: `sync_id`, `session_id`, `type`, `title`, `content`, or `scope`. Newer Engram versions write these fields correctly, but old journal rows may still need repair before first cloud upload.
 
 ### Safe path: helper script
 
-Engram includes a temporary rescue helper:
+Engram includes a temporary rescue helper. Despite the historical file name, it repairs both missing session directories and missing observation payload fields:
 
 ```bash
 tools/repair-missing-session-directory.sh <project>
 ```
 
-Run it from inside the real project directory. Dry-run is the default.
+Run it from inside the real project directory for session directory repairs. Observation repairs do not require a directory argument. Dry-run is the default.
 
 ```bash
 cd /absolute/path/to/project
 tools/repair-missing-session-directory.sh <project>
 ```
 
-Review the preview. If the detected `Directory:` is correct, apply:
+Review the preview. For session repairs, confirm the detected `Directory:` is correct. For observation repairs, confirm the `Local observation row` is the authoritative local data. If an observation field such as `title` is still missing and the local row cannot fully infer it, preview an interactive repair first:
+
+```bash
+tools/repair-missing-session-directory.sh --interactive --seq 1677 sias-app
+```
+
+The interactive mode shows the mutation payload, matching local observation row when available, and a short content excerpt so you can provide only the missing required observation fields. Dry-run is still the default, so review the patched payload first. When it looks correct, rerun with `--apply --interactive`:
+
+```bash
+tools/repair-missing-session-directory.sh --apply --interactive --seq 1677 sias-app
+```
+
+For non-interactive repairs that can be inferred completely from local state, apply directly:
 
 ```bash
 tools/repair-missing-session-directory.sh --apply <project>
@@ -124,13 +143,21 @@ engram sync --cloud --project <project>
 
 ### What the script changes
 
-The script patches one legacy row in `sync_mutations` by adding a JSON field:
+For session repairs, the script patches one legacy row in `sync_mutations` by adding a JSON field:
 
 ```json
 "directory": "/absolute/path/to/project"
 ```
 
 It also updates `sessions.directory` only when the matching session row exists and its directory is empty.
+
+For observation repairs, the script reads the authoritative local row from `observations` using `payload.sync_id` or `entity_key`, then fills only missing or empty fields in the mutation payload:
+
+```text
+sync_id, session_id, type, title, content, scope
+```
+
+It does not invent values in non-interactive mode. If the local observation row is missing, or the required payload fields would still be empty after patching, the script exits non-zero without modifying the database. Use `--interactive` when you need to provide missing observation values manually after reviewing the payload and content excerpt.
 
 It never changes `last_acked_seq`, never deletes mutations, and creates a timestamped database backup before `--apply`.
 
@@ -146,6 +173,7 @@ and extracts the first matching blocker:
 
 ```text
 seq=N entity=session op=upsert
+seq=N entity=observation op=upsert
 ```
 
 If you already know the sequence:
@@ -208,6 +236,7 @@ Do not manually edit SQLite without a backup.
 |---|---|
 | `chunk_id does not match payload content hash` | Upgrade client and server to `v1.14.8` or newer |
 | `session payload directory is required` | Run the missing session directory helper |
+| `observation payload title is required for upsert` | Run the missing session directory helper; it also repairs missing observation payload fields from local `observations` |
 | `401` or `auth_required` | Check `ENGRAM_CLOUD_TOKEN` on the client and server |
 | `403` or `policy_forbidden` | Check `ENGRAM_CLOUD_ALLOWED_PROJECTS` on the server |
 | `server_unsupported` | Redeploy a cloud server with mutation endpoints |
