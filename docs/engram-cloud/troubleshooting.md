@@ -103,7 +103,7 @@ You may also see the failure only during the final server push, even after `doct
 write chunk: cloud: push chunk ...: status 400: invalid push payload: sessions[N].directory is required
 ```
 
-It means a historical `session` mutation in `sync_mutations` is missing `directory`, a local `sessions` row for the project still has an empty/null `directory`, or a historical `observation` mutation is missing one of the required upsert fields: `sync_id`, `session_id`, `type`, `title`, `content`, or `scope`. Newer Engram versions write these fields correctly, but old journal rows or local session rows may still need repair before first cloud upload.
+It means a historical `session` mutation in `sync_mutations` is missing `directory`, a local `sessions` row included in the project export still has an empty/null `directory`, or a historical `observation` mutation is missing one of the required upsert fields: `sync_id`, `session_id`, `type`, `title`, `content`, or `scope`. Newer Engram versions write these fields correctly, but old journal rows or local session rows may still need repair before first cloud upload.
 
 ### Safe path: helper script
 
@@ -144,7 +144,7 @@ If doctor reveals another legacy blocker after each repair, use loop mode after 
 tools/repair-missing-session-directory.sh --apply --interactive --all <project>
 ```
 
-Loop mode repairs exactly one supported blocker (`entity=session|observation op=upsert`), reruns `engram cloud upgrade doctor --project <project>`, then repeats until doctor no longer reports a supported blocker. If doctor reports ready but local `sessions` rows for the project still have empty/null `directory`, loop mode applies that fallback repair and reruns doctor once more. It still stops on unsupported blockers, project mismatches, or observation payloads that cannot be fully inferred. In non-interactive loop mode, rerun with `--interactive` when the script asks for human-provided observation fields.
+Loop mode repairs exactly one supported blocker (`entity=session|observation op=upsert`), reruns `engram cloud upgrade doctor --project <project>`, then repeats until doctor no longer reports a supported blocker. If doctor reports ready but local `sessions` rows included in the project export still have empty/null `directory`, loop mode applies that fallback repair and reruns doctor once more. It still stops on unsupported blockers, project mismatches, or observation payloads that cannot be fully inferred. In non-interactive loop mode, rerun with `--interactive` when the script asks for human-provided observation fields.
 
 If one-shot mode finds no doctor blocker but reports local sessions with empty/null directory, preview and apply the fallback explicitly:
 
@@ -176,7 +176,7 @@ For session repairs, the script patches one legacy row in `sync_mutations` by ad
 "directory": "/absolute/path/to/project"
 ```
 
-It also updates `sessions.directory` only when the matching session row exists and its directory is empty. In the fallback path for `sessions[N].directory is required`, it updates only local `sessions` rows for the requested project where `directory IS NULL OR directory = ''`; it does not modify `sync_mutations`.
+It also updates `sessions.directory` only when the matching session row exists and its directory is empty. In the fallback path for `sessions[N].directory is required`, it updates only local `sessions` rows included in the requested project export scope where `directory IS NULL OR directory = ''`; it does not modify `sync_mutations`.
 
 For observation repairs, the script reads the authoritative local row from `observations` using `payload.sync_id` or `entity_key`, then fills only missing or empty fields in the mutation payload:
 
@@ -252,6 +252,7 @@ If you want to inspect before using the helper:
 sqlite3 ~/.engram/engram.db "select seq, entity, op, entity_key, payload from sync_mutations where seq = 873;"
 sqlite3 ~/.engram/engram.db "select id, project, directory from sessions where id = 'manual-save-current';"
 sqlite3 ~/.engram/engram.db "select id, project, started_at, directory from sessions where project = '<project>' and (directory is null or directory = '');"
+sqlite3 ~/.engram/engram.db "select s.id, s.project, s.started_at, s.directory from sessions s where (s.directory is null or s.directory = '') and (s.project = '<project>' or s.id in (select session_id from observations where ifnull(project, '') = '<project>' union select session_id from user_prompts where ifnull(project, '') = '<project>'));"
 ```
 
 Do not manually edit SQLite without a backup.

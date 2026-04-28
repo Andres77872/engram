@@ -284,28 +284,50 @@ empty_session_count() {
     printf '0\n'
     return 0
   fi
+  scope_predicate=$(empty_session_scope_predicate)
+  sqlite_scalar "SELECT COUNT(*) FROM sessions WHERE ifnull(directory, '') = '' AND $scope_predicate;"
+}
+
+empty_session_scope_predicate() {
   PROJECT_SQL=$(sql_escape "$PROJECT")
-  sqlite_scalar "SELECT COUNT(*) FROM sessions WHERE project = '$PROJECT_SQL' AND ifnull(directory, '') = '';"
+  predicate="(project = '$PROJECT_SQL'"
+
+  if have_table observations; then
+    predicate="$predicate OR id IN (
+      SELECT session_id FROM observations
+       WHERE ifnull(project, '') = '$PROJECT_SQL'
+          OR (ifnull(project, '') = '' AND session_id IN (SELECT id FROM sessions WHERE project = '$PROJECT_SQL'))
+    )"
+  fi
+
+  if have_table user_prompts; then
+    predicate="$predicate OR id IN (
+      SELECT session_id FROM user_prompts
+       WHERE ifnull(project, '') = '$PROJECT_SQL'
+          OR (ifnull(project, '') = '' AND session_id IN (SELECT id FROM sessions WHERE project = '$PROJECT_SQL'))
+    )"
+  fi
+
+  printf '%s\n' "$predicate)"
 }
 
 preview_empty_sessions() {
-  PROJECT_SQL=$(sql_escape "$PROJECT")
+  scope_predicate=$(empty_session_scope_predicate)
   info "Affected local sessions:"
   if have_column sessions started_at; then
-    sqlite_box "SELECT id, project, started_at, ifnull(directory, '') AS directory FROM sessions WHERE project = '$PROJECT_SQL' AND ifnull(directory, '') = '' ORDER BY ifnull(started_at, ''), id;" || true
+    sqlite_box "SELECT id, project, started_at, ifnull(directory, '') AS directory FROM sessions WHERE ifnull(directory, '') = '' AND $scope_predicate ORDER BY ifnull(started_at, ''), id;" || true
   else
-    sqlite_box "SELECT id, project, ifnull(directory, '') AS directory FROM sessions WHERE project = '$PROJECT_SQL' AND ifnull(directory, '') = '' ORDER BY id;" || true
+    sqlite_box "SELECT id, project, ifnull(directory, '') AS directory FROM sessions WHERE ifnull(directory, '') = '' AND $scope_predicate ORDER BY id;" || true
   fi
 }
 
 repair_empty_sessions() {
   have_table sessions || die "sessions table not found in DB: $DB"
-  PROJECT_SQL=$(sql_escape "$PROJECT")
   missing_count=$(empty_session_count)
 
   if [ "$missing_count" = "0" ]; then
-    info "No local sessions with empty/null directory found for project '$PROJECT'."
-    return 1
+    info "No local sessions in project export scope with empty/null directory found for project '$PROJECT'."
+    return 0
   fi
 
   DIRECTORY=$(resolve_directory)
@@ -332,12 +354,13 @@ repair_empty_sessions() {
   cp "$DB" "$backup"
   info ""
   info "Backup created: $backup"
+  scope_predicate=$(empty_session_scope_predicate)
 
   sqlite3 -batch "$DB" "BEGIN;
 UPDATE sessions
 SET directory = '$DIRECTORY_SQL'
-WHERE project = '$PROJECT_SQL'
-  AND ifnull(directory, '') = '';
+WHERE ifnull(directory, '') = ''
+  AND $scope_predicate;
 COMMIT;"
 
   remaining_count=$(empty_session_count)
@@ -351,7 +374,7 @@ handle_no_supported_blocker() {
   missing_count=$(empty_session_count)
 
   if [ "$missing_count" != "0" ]; then
-    info "No supported sync_mutations blocker found, but $missing_count local session row(s) for project '$PROJECT' have empty/null directory."
+    info "No supported sync_mutations blocker found, but $missing_count local session row(s) in project export scope for '$PROJECT' have empty/null directory."
     if [ "$FIX_EMPTY_SESSIONS" -eq 1 ] || [ "$ALL" -eq 1 ]; then
       repair_empty_sessions
       return 0
@@ -361,12 +384,20 @@ handle_no_supported_blocker() {
   fi
 
   info "No supported session/observation upsert blocker found."
+  if [ "$FIX_EMPTY_SESSIONS" -eq 1 ]; then
+    info "No local sessions in project export scope with empty/null directory found for project '$PROJECT'."
+  fi
   [ "$context" = "loop" ] && info "Loop mode complete."
   return 1
 }
 
 if [ ! "$SEQ" ] || [ "$ALL" -eq 1 ]; then
   require_cmd engram
+fi
+
+if [ "$FIX_EMPTY_SESSIONS" -eq 1 ] && [ "$ALL" -ne 1 ] && [ ! "$SEQ" ]; then
+  repair_empty_sessions
+  exit 0
 fi
 
 if [ ! "$SEQ" ] && [ "$ALL" -ne 1 ]; then
