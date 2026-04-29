@@ -31,6 +31,17 @@ var openDB = sql.Open
 // See https://www.sqlite.org/rescode.html#constraint_foreignkey
 const sqliteConstraintForeignKey = 787
 
+const (
+	sqlitePrimaryBusy   = 5
+	sqlitePrimaryLocked = 6
+)
+
+var sqliteWriteRetryBackoffs = []time.Duration{
+	10 * time.Millisecond,
+	25 * time.Millisecond,
+	50 * time.Millisecond,
+}
+
 // Sentinel errors returned by delete operations so callers can use errors.Is.
 var (
 	ErrSessionNotFound        = errors.New("session not found")
@@ -4275,15 +4286,46 @@ func (s *Store) PruneProject(project string) (*PruneResult, error) {
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
 func (s *Store) withTx(fn func(tx *sql.Tx) error) error {
-	tx, err := s.beginTxHook()
-	if err != nil {
-		return err
+	return withSQLiteWriteRetry(func() error {
+		tx, err := s.beginTxHook()
+		if err != nil {
+			return err
+		}
+		defer tx.Rollback()
+		if err := fn(tx); err != nil {
+			return err
+		}
+		return s.commitHook(tx)
+	})
+}
+
+func withSQLiteWriteRetry(fn func() error) error {
+	var lastErr error
+	for attempt := 0; attempt <= len(sqliteWriteRetryBackoffs); attempt++ {
+		if err := fn(); err != nil {
+			lastErr = err
+			if !isRetryableSQLiteLockError(err) || attempt == len(sqliteWriteRetryBackoffs) {
+				return err
+			}
+			time.Sleep(sqliteWriteRetryBackoffs[attempt])
+			continue
+		}
+		return nil
 	}
-	defer tx.Rollback()
-	if err := fn(tx); err != nil {
-		return err
+	return lastErr
+}
+
+func isRetryableSQLiteLockError(err error) bool {
+	if err == nil {
+		return false
 	}
-	return s.commitHook(tx)
+	var sqliteErr *sqlite.Error
+	if errors.As(err, &sqliteErr) {
+		primaryCode := sqliteErr.Code() & 0xff
+		return primaryCode == sqlitePrimaryBusy || primaryCode == sqlitePrimaryLocked
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "database is locked") || strings.Contains(msg, "database is busy") || strings.Contains(msg, "sqlite_busy") || strings.Contains(msg, "sqlite_locked")
 }
 
 func (s *Store) createSessionTx(tx *sql.Tx, id, project, directory string) error {

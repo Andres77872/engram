@@ -1501,9 +1501,10 @@ func handleSessionStart(s *store.Store, cfg MCPConfig, activity *SessionActivity
 	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		id, _ := req.GetArguments()["id"].(string)
 		directory, _ := req.GetArguments()["directory"].(string)
+		explicitDirectory := strings.TrimSpace(directory)
 		// project field intentionally not read — auto-detect only (REQ-308)
 
-		detRes, err := resolveWriteProject()
+		detRes, err := resolveSessionStartProject(explicitDirectory)
 		if err != nil {
 			// JW1: use AvailableProjects from detection result (repos in cwd).
 			return errorWithMeta("ambiguous_project",
@@ -1514,6 +1515,12 @@ func handleSessionStart(s *store.Store, cfg MCPConfig, activity *SessionActivity
 		project, _ := store.NormalizeProject(detRes.Project)
 
 		activity.RecordToolCall(defaultSessionID(project))
+		if explicitDirectory == "" {
+			directory = strings.TrimSpace(detRes.Path)
+			if directory == "" {
+				directory = currentWorkingDirectory()
+			}
+		}
 
 		if err := s.CreateSession(id, project, directory); err != nil {
 			return mcp.NewToolResultError("Failed to start session: " + err.Error()), nil
@@ -1522,6 +1529,20 @@ func handleSessionStart(s *store.Store, cfg MCPConfig, activity *SessionActivity
 		detRes.Project = project
 		return respondWithProject(detRes, fmt.Sprintf("Session %q started for project %q", id, project), nil), nil
 	}
+}
+
+func resolveSessionStartProject(explicitDirectory string) (projectpkg.DetectionResult, error) {
+	if explicitDirectory == "" {
+		return resolveWriteProject()
+	}
+	res := projectpkg.DetectProjectFull(explicitDirectory)
+	if res.Error != nil {
+		return res, res.Error
+	}
+	if res.Source == projectpkg.SourceDirBasename {
+		return resolveWriteProject()
+	}
+	return res, nil
 }
 
 func handleSessionEnd(s *store.Store, cfg MCPConfig, activity *SessionActivity) server.ToolHandlerFunc {

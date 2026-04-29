@@ -3616,6 +3616,66 @@ func TestHookFallbacksAndAdditionalBranches(t *testing.T) {
 	})
 }
 
+func TestSQLiteWriteRetryRetriesTransientLockErrors(t *testing.T) {
+	oldBackoffs := sqliteWriteRetryBackoffs
+	sqliteWriteRetryBackoffs = []time.Duration{0, 0, 0}
+	t.Cleanup(func() { sqliteWriteRetryBackoffs = oldBackoffs })
+
+	t.Run("begin lock is retried and succeeds", func(t *testing.T) {
+		s := newTestStore(t)
+		origBegin := s.hooks.beginTx
+		attempts := 0
+		s.hooks.beginTx = func(db *sql.DB) (*sql.Tx, error) {
+			attempts++
+			if attempts < 3 {
+				return nil, errors.New("database is locked")
+			}
+			return origBegin(db)
+		}
+
+		if err := s.CreateSession("retry-session", "retry-project", "/tmp/retry-project"); err != nil {
+			t.Fatalf("expected retry to succeed, got %v", err)
+		}
+		if attempts != 3 {
+			t.Fatalf("expected 3 begin attempts, got %d", attempts)
+		}
+	})
+
+	t.Run("non lock error is not retried", func(t *testing.T) {
+		s := newTestStore(t)
+		attempts := 0
+		s.hooks.beginTx = func(_ *sql.DB) (*sql.Tx, error) {
+			attempts++
+			return nil, errors.New("permanent begin failure")
+		}
+
+		err := s.CreateSession("no-retry-session", "retry-project", "/tmp/retry-project")
+		if err == nil || !strings.Contains(err.Error(), "permanent begin failure") {
+			t.Fatalf("expected permanent error, got %v", err)
+		}
+		if attempts != 1 {
+			t.Fatalf("expected one attempt for permanent error, got %d", attempts)
+		}
+	})
+
+	t.Run("lock errors remain bounded", func(t *testing.T) {
+		s := newTestStore(t)
+		attempts := 0
+		s.hooks.beginTx = func(_ *sql.DB) (*sql.Tx, error) {
+			attempts++
+			return nil, errors.New("SQLITE_BUSY: database is locked")
+		}
+
+		err := s.CreateSession("bounded-session", "retry-project", "/tmp/retry-project")
+		if err == nil || !isRetryableSQLiteLockError(err) {
+			t.Fatalf("expected retryable lock error after exhaustion, got %v", err)
+		}
+		if attempts != len(sqliteWriteRetryBackoffs)+1 {
+			t.Fatalf("expected bounded attempts=%d, got %d", len(sqliteWriteRetryBackoffs)+1, attempts)
+		}
+	})
+}
+
 func TestStoreUncoveredBranchesPushToHundred(t *testing.T) {
 	t.Run("new open database hook error", func(t *testing.T) {
 		orig := openDB

@@ -861,6 +861,84 @@ func TestCmdCloudUpgradeDoctorRequiresProjectAndIsDeterministic(t *testing.T) {
 	})
 }
 
+func TestCmdSyncCloudPreflightsLegacyMutationPayloads(t *testing.T) {
+	stubExitWithPanic(t)
+	stubRuntimeHooks(t)
+
+	cfg := testConfig(t)
+	if err := saveCloudConfig(cfg, &cloudConfig{ServerURL: "https://cloud.example.test"}); err != nil {
+		t.Fatalf("save cloud config: %v", err)
+	}
+
+	s, err := store.New(cfg)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	if err := s.CreateSession("sync-legacy-s1", "sync-legacy", "/tmp/sync-legacy"); err != nil {
+		_ = s.Close()
+		t.Fatalf("create session: %v", err)
+	}
+	if _, err := s.AddObservation(store.AddObservationParams{SessionID: "sync-legacy-s1", Type: "decision", Title: "Canonical title", Content: "Canonical content", Project: "sync-legacy", Scope: "project"}); err != nil {
+		_ = s.Close()
+		t.Fatalf("add observation: %v", err)
+	}
+	if err := s.EnrollProject("sync-legacy"); err != nil {
+		_ = s.Close()
+		t.Fatalf("enroll project: %v", err)
+	}
+	_ = s.Close()
+
+	db, err := sql.Open("sqlite", filepath.Join(cfg.DataDir, "engram.db"))
+	if err != nil {
+		t.Fatalf("open raw db: %v", err)
+	}
+	defer db.Close()
+	var syncID string
+	if err := db.QueryRow(`SELECT sync_id FROM observations WHERE session_id = ? ORDER BY id DESC LIMIT 1`, "sync-legacy-s1").Scan(&syncID); err != nil {
+		t.Fatalf("lookup sync id: %v", err)
+	}
+	legacyPayload := `{"sync_id":"` + syncID + `","session_id":"sync-legacy-s1","type":"decision","content":"legacy payload missing title","scope":"project"}`
+	if _, err := db.Exec(
+		`INSERT INTO sync_mutations (target_key, entity, entity_key, op, payload, source, project) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		store.DefaultSyncTargetKey,
+		store.SyncEntityObservation,
+		syncID,
+		store.SyncOpUpsert,
+		legacyPayload,
+		store.SyncSourceLocal,
+		"sync-legacy",
+	); err != nil {
+		t.Fatalf("insert legacy mutation: %v", err)
+	}
+
+	exportCalled := false
+	oldSyncExport := syncExport
+	syncExport = func(_ *engramsync.Syncer, _, _ string) (*engramsync.SyncResult, error) {
+		exportCalled = true
+		return &engramsync.SyncResult{}, nil
+	}
+	t.Cleanup(func() { syncExport = oldSyncExport })
+
+	withArgs(t, "engram", "sync", "--cloud", "--project", "sync-legacy")
+	_, stderr, recovered := captureOutputAndRecover(t, func() { cmdSync(cfg) })
+	if _, ok := recovered.(exitCode); !ok {
+		t.Fatalf("expected cloud sync preflight to fail loudly, got %v", recovered)
+	}
+	if exportCalled {
+		t.Fatal("cloud sync must block before export/canonicalization")
+	}
+	if !strings.Contains(stderr, "legacy mutation payloads require repair before cloud sync") ||
+		!strings.Contains(stderr, "engram cloud upgrade doctor --project sync-legacy") ||
+		!strings.Contains(stderr, "engram cloud upgrade repair --project sync-legacy --apply") {
+		t.Fatalf("expected actionable legacy mutation guidance, got %q", stderr)
+	}
+
+	var persistedPayload string
+	if err := db.QueryRow(`SELECT payload FROM sync_mutations WHERE project = ? AND payload = ?`, "sync-legacy", legacyPayload).Scan(&persistedPayload); err != nil {
+		t.Fatalf("expected sync preflight not to auto-repair payload: %v", err)
+	}
+}
+
 func TestCmdCloudUpgradeBootstrapStatusAndRollbackSemantics(t *testing.T) {
 	stubExitWithPanic(t)
 	stubRuntimeHooks(t)

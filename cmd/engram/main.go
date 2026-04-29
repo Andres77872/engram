@@ -486,8 +486,51 @@ func preflightCloudSync(s *store.Store, cfg store.Config, project string, mutate
 			}
 			return nil, fmt.Errorf("cloud sync blocked_unenrolled: %s", message)
 		}
+		if err := preflightCloudSyncLegacyMutations(s, project, targetKey, mutateState); err != nil {
+			return nil, err
+		}
 	}
 	return cc, nil
+}
+
+func preflightCloudSyncLegacyMutations(s *store.Store, project, targetKey string, mutateState bool) error {
+	report, err := s.DiagnoseCloudUpgradeLegacyMutations(project)
+	if err != nil {
+		return fmt.Errorf("cloud sync legacy mutation preflight: %w", err)
+	}
+	if report.BlockedCount == 0 && report.RepairableCount == 0 {
+		return nil
+	}
+
+	reasonCode := store.UpgradeReasonRepairableLegacyMutationPayload
+	message := fmt.Sprintf(
+		"legacy mutation payloads require repair before cloud sync for project %q: run `engram cloud upgrade doctor --project %s` then `engram cloud upgrade repair --project %s --apply`",
+		project, project, project,
+	)
+	if report.BlockedCount > 0 {
+		reasonCode = store.UpgradeReasonBlockedLegacyMutationManual
+		first := firstBlockedLegacyMutationFinding(report)
+		message = fmt.Sprintf(
+			"legacy mutation payloads require manual action before cloud sync for project %q (seq=%d entity=%s op=%s): %s; inspect with `engram cloud upgrade doctor --project %s` and run `engram cloud upgrade repair --project %s --apply` for deterministic repairs",
+			project, first.Seq, first.Entity, first.Op, first.Message, project, project,
+		)
+	}
+	if mutateState {
+		_ = s.MarkSyncBlocked(targetKey, reasonCode, message)
+	}
+	return fmt.Errorf("cloud sync %s: %s", reasonCode, message)
+}
+
+func firstBlockedLegacyMutationFinding(report store.CloudUpgradeLegacyMutationReport) store.CloudUpgradeLegacyMutationFinding {
+	for _, finding := range report.Findings {
+		if !finding.Repairable {
+			return finding
+		}
+	}
+	if len(report.Findings) > 0 {
+		return report.Findings[0]
+	}
+	return store.CloudUpgradeLegacyMutationFinding{}
 }
 
 func cloudTargetKeyForProject(project string) string {

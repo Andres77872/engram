@@ -2546,6 +2546,180 @@ func TestSessionStartUsesDefaultSessionID(t *testing.T) {
 	}
 }
 
+func TestSessionStartWithoutDirectoryUsesCurrentWorkingDirectory(t *testing.T) {
+	s := newMCPTestStore(t)
+
+	dir := t.TempDir()
+	initTestGitRepo(t, dir)
+	cmd := exec.Command("git", "-C", dir, "remote", "add", "origin",
+		"git@github.com:user/session-start-cwd-project.git")
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git remote add: %v\n%s", err, out)
+	}
+	t.Chdir(dir)
+	if err := s.EnrollProject("session-start-cwd-project"); err != nil {
+		t.Fatalf("enroll project: %v", err)
+	}
+
+	start := handleSessionStart(s, MCPConfig{}, NewSessionActivity(10*time.Minute))
+	res, err := start(context.Background(), mcppkg.CallToolRequest{
+		Params: mcppkg.CallToolParams{Arguments: map[string]any{
+			"id": "session-start-cwd",
+		}},
+	})
+	if err != nil || res.IsError {
+		t.Fatalf("session start: err=%v isError=%v text=%s", err, res.IsError, callResultText(t, res))
+	}
+
+	sess, err := s.GetSession("session-start-cwd")
+	if err != nil {
+		t.Fatalf("get session: %v", err)
+	}
+	wantDir, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		t.Fatalf("eval expected dir: %v", err)
+	}
+	gotDir, err := filepath.EvalSymlinks(sess.Directory)
+	if err != nil {
+		t.Fatalf("eval session dir: %v", err)
+	}
+	if gotDir != wantDir {
+		t.Fatalf("expected directory=%q, got %q", wantDir, gotDir)
+	}
+	assertSessionSyncMutationDirectory(t, s, "session-start-cwd", sess.Directory)
+}
+
+func TestSessionStartWithWhitespaceDirectoryUsesCurrentWorkingDirectory(t *testing.T) {
+	s := newMCPTestStore(t)
+
+	dir := t.TempDir()
+	initTestGitRepo(t, dir)
+	cmd := exec.Command("git", "-C", dir, "remote", "add", "origin",
+		"git@github.com:user/session-start-whitespace-project.git")
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git remote add: %v\n%s", err, out)
+	}
+	t.Chdir(dir)
+	if err := s.EnrollProject("session-start-whitespace-project"); err != nil {
+		t.Fatalf("enroll project: %v", err)
+	}
+
+	start := handleSessionStart(s, MCPConfig{}, NewSessionActivity(10*time.Minute))
+	res, err := start(context.Background(), mcppkg.CallToolRequest{
+		Params: mcppkg.CallToolParams{Arguments: map[string]any{
+			"id":        "session-start-whitespace",
+			"directory": " \t\n ",
+		}},
+	})
+	if err != nil || res.IsError {
+		t.Fatalf("session start: err=%v isError=%v text=%s", err, res.IsError, callResultText(t, res))
+	}
+
+	sess, err := s.GetSession("session-start-whitespace")
+	if err != nil {
+		t.Fatalf("get session: %v", err)
+	}
+	wantDir, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		t.Fatalf("eval expected dir: %v", err)
+	}
+	gotDir, err := filepath.EvalSymlinks(sess.Directory)
+	if err != nil {
+		t.Fatalf("eval session dir: %v", err)
+	}
+	if gotDir != wantDir {
+		t.Fatalf("expected directory=%q, got %q", wantDir, gotDir)
+	}
+	assertSessionSyncMutationDirectory(t, s, "session-start-whitespace", sess.Directory)
+}
+
+func TestSessionStartWithExplicitDirectoryPreservesDirectory(t *testing.T) {
+	s := newMCPTestStore(t)
+
+	dir := t.TempDir()
+	initTestGitRepo(t, dir)
+	cmd := exec.Command("git", "-C", dir, "remote", "add", "origin",
+		"git@github.com:user/session-start-explicit-project.git")
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git remote add: %v\n%s", err, out)
+	}
+	t.Chdir(dir)
+	if err := s.EnrollProject("session-start-explicit-project"); err != nil {
+		t.Fatalf("enroll project: %v", err)
+	}
+	explicitDir := filepath.Join(t.TempDir(), "explicit-worktree")
+
+	start := handleSessionStart(s, MCPConfig{}, NewSessionActivity(10*time.Minute))
+	res, err := start(context.Background(), mcppkg.CallToolRequest{
+		Params: mcppkg.CallToolParams{Arguments: map[string]any{
+			"id":        "session-start-explicit",
+			"directory": explicitDir,
+		}},
+	})
+	if err != nil || res.IsError {
+		t.Fatalf("session start: err=%v isError=%v text=%s", err, res.IsError, callResultText(t, res))
+	}
+
+	sess, err := s.GetSession("session-start-explicit")
+	if err != nil {
+		t.Fatalf("get session: %v", err)
+	}
+	if sess.Directory != explicitDir {
+		t.Fatalf("expected directory=%q, got %q", explicitDir, sess.Directory)
+	}
+	assertSessionSyncMutationDirectory(t, s, "session-start-explicit", explicitDir)
+}
+
+func TestSessionStartWithExplicitDirectoryResolvesProjectFromDirectory(t *testing.T) {
+	s := newMCPTestStore(t)
+
+	workspace := t.TempDir()
+	rightRepo := filepath.Join(workspace, "right-repo")
+	wrongRepo := filepath.Join(workspace, "wrong-repo")
+	if err := os.MkdirAll(filepath.Join(rightRepo, "nested"), 0755); err != nil {
+		t.Fatalf("create right repo nested dir: %v", err)
+	}
+	if err := os.MkdirAll(wrongRepo, 0755); err != nil {
+		t.Fatalf("create wrong repo dir: %v", err)
+	}
+	initTestGitRepo(t, rightRepo)
+	initTestGitRepo(t, wrongRepo)
+	cmd := exec.Command("git", "-C", rightRepo, "remote", "add", "origin",
+		"git@github.com:user/explicit-session-project.git")
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git remote add right repo: %v\n%s", err, out)
+	}
+	cmd = exec.Command("git", "-C", wrongRepo, "remote", "add", "origin",
+		"git@github.com:user/wrong-session-project.git")
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git remote add wrong repo: %v\n%s", err, out)
+	}
+	t.Chdir(workspace)
+
+	explicitDir := filepath.Join(rightRepo, "nested")
+	start := handleSessionStart(s, MCPConfig{}, NewSessionActivity(10*time.Minute))
+	res, err := start(context.Background(), mcppkg.CallToolRequest{
+		Params: mcppkg.CallToolParams{Arguments: map[string]any{
+			"id":        "session-start-explicit-project",
+			"directory": explicitDir,
+		}},
+	})
+	if err != nil || res.IsError {
+		t.Fatalf("session start: err=%v isError=%v text=%s", err, res.IsError, callResultText(t, res))
+	}
+
+	sess, err := s.GetSession("session-start-explicit-project")
+	if err != nil {
+		t.Fatalf("get session: %v", err)
+	}
+	if sess.Project != "explicit-session-project" {
+		t.Fatalf("expected explicit directory project, got %q", sess.Project)
+	}
+	if sess.Directory != explicitDir {
+		t.Fatalf("expected persisted directory=%q, got %q", explicitDir, sess.Directory)
+	}
+}
+
 // ─── Batch 4: Write handler schema + auto-detect ─────────────────────────────
 
 // TestWriteSchema_NoProjectField asserts that the 6 write tools do NOT include
