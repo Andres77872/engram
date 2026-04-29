@@ -223,6 +223,11 @@ type SyncMutation struct {
 	AckedAt    *string `json:"acked_at,omitempty"`
 }
 
+type PendingSyncMutationProjectCount struct {
+	Project string `json:"project"`
+	Count   int64  `json:"count"`
+}
+
 const (
 	UpgradeStagePlanned           = "planned"
 	UpgradeStageDoctorReady       = "doctor_ready"
@@ -3115,6 +3120,34 @@ func (s *Store) ListPendingSyncMutationsAfterSeq(targetKey string, afterSeq int6
 		mutations = append(mutations, mutation)
 	}
 	return mutations, rows.Err()
+}
+
+func (s *Store) CountPendingNonEnrolledSyncMutations(targetKey string) ([]PendingSyncMutationProjectCount, error) {
+	targetKey = normalizeSyncTargetKey(targetKey)
+	rows, err := s.queryItHook(s.db, `
+		SELECT sm.project, COUNT(*)
+		FROM sync_mutations sm
+		LEFT JOIN sync_enrolled_projects sep ON sm.project = sep.project
+		WHERE sm.target_key = ?
+		  AND sm.acked_at IS NULL
+		  AND sm.project != ''
+		  AND sep.project IS NULL
+		GROUP BY sm.project
+		ORDER BY sm.project ASC`, targetKey)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	counts := []PendingSyncMutationProjectCount{}
+	for rows.Next() {
+		var count PendingSyncMutationProjectCount
+		if err := rows.Scan(&count.Project, &count.Count); err != nil {
+			return nil, err
+		}
+		counts = append(counts, count)
+	}
+	return counts, rows.Err()
 }
 
 // SkipAckNonEnrolledMutations acks (marks as skipped) all pending mutations

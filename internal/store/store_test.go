@@ -5220,6 +5220,63 @@ func TestListPendingSyncMutationsIncludesProject(t *testing.T) {
 	}
 }
 
+func TestCountPendingNonEnrolledSyncMutations(t *testing.T) {
+	s := newTestStore(t)
+
+	if err := s.EnrollProject("enrolled-project"); err != nil {
+		t.Fatalf("enroll: %v", err)
+	}
+	for i, project := range []string{"alpha", "alpha", "beta", "enrolled-project"} {
+		if _, err := s.db.Exec(
+			`INSERT INTO sync_mutations (target_key, entity, entity_key, op, payload, source, project) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+			DefaultSyncTargetKey,
+			SyncEntityObservation,
+			fmt.Sprintf("key-%s-%d", project, i),
+			SyncOpUpsert,
+			`{}`,
+			SyncSourceLocal,
+			project,
+		); err != nil {
+			t.Fatalf("insert mutation for %s: %v", project, err)
+		}
+	}
+	if _, err := s.db.Exec(
+		`INSERT INTO sync_mutations (target_key, entity, entity_key, op, payload, source, project) VALUES (?, ?, ?, ?, ?, ?, '')`,
+		DefaultSyncTargetKey, SyncEntityObservation, "global-key", SyncOpUpsert, `{}`, SyncSourceLocal,
+	); err != nil {
+		t.Fatalf("insert global mutation: %v", err)
+	}
+	if _, err := s.db.Exec(
+		`INSERT INTO sync_mutations (target_key, entity, entity_key, op, payload, source, project, acked_at) VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'))`,
+		DefaultSyncTargetKey, SyncEntityObservation, "acked-alpha", SyncOpUpsert, `{}`, SyncSourceLocal, "alpha",
+	); err != nil {
+		t.Fatalf("insert acked mutation: %v", err)
+	}
+	if _, err := s.db.Exec(`INSERT OR IGNORE INTO sync_state (target_key, lifecycle, updated_at) VALUES (?, 'idle', datetime('now'))`, "cloud:other"); err != nil {
+		t.Fatalf("insert other sync state: %v", err)
+	}
+	if _, err := s.db.Exec(
+		`INSERT INTO sync_mutations (target_key, entity, entity_key, op, payload, source, project) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		"cloud:other", SyncEntityObservation, "other-target-alpha", SyncOpUpsert, `{}`, SyncSourceLocal, "alpha",
+	); err != nil {
+		t.Fatalf("insert other target mutation: %v", err)
+	}
+
+	counts, err := s.CountPendingNonEnrolledSyncMutations(DefaultSyncTargetKey)
+	if err != nil {
+		t.Fatalf("count pending non-enrolled: %v", err)
+	}
+	want := []PendingSyncMutationProjectCount{{Project: "alpha", Count: 2}, {Project: "beta", Count: 1}}
+	if len(counts) != len(want) {
+		t.Fatalf("expected %d counts, got %#v", len(want), counts)
+	}
+	for i := range want {
+		if counts[i] != want[i] {
+			t.Fatalf("count[%d]: expected %#v, got %#v", i, want[i], counts[i])
+		}
+	}
+}
+
 // ─── Phase 3: extractProjectFromPayload ──────────────────────────────────────
 
 func TestExtractProjectFromSessionPayload(t *testing.T) {

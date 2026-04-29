@@ -1336,6 +1336,35 @@ func TestCmdCloudStatusHonorsEnvServerOverride(t *testing.T) {
 	}
 }
 
+func TestCmdCloudStatusSurfacesPersistedNonEnrolledPendingDiagnostic(t *testing.T) {
+	stubExitWithPanic(t)
+	stubRuntimeHooks(t)
+
+	cfg := testConfig(t)
+	t.Setenv("ENGRAM_CLOUD_SERVER", "https://env-cloud.example.test")
+	t.Setenv("ENGRAM_CLOUD_TOKEN", "env-token")
+	s, err := store.New(cfg)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	if err := s.MarkSyncBlocked(store.DefaultSyncTargetKey, constants.ReasonNonEnrolledPendingMutations, "pending cloud sync mutations are blocked because project(s) are not enrolled: alpha=2. Run `engram cloud enroll <project>` for each intended project or review enrollment."); err != nil {
+		_ = s.Close()
+		t.Fatalf("mark blocked: %v", err)
+	}
+	_ = s.Close()
+
+	withArgs(t, "engram", "cloud", "status")
+	stdout, stderr, recovered := captureOutputAndRecover(t, func() { cmdCloud(cfg) })
+	if recovered != nil || stderr != "" {
+		t.Fatalf("cloud status should succeed, panic=%v stderr=%q", recovered, stderr)
+	}
+	for _, want := range []string{"Sync diagnostic: degraded", "reason_code: non_enrolled_pending_mutations", "engram cloud enroll <project>"} {
+		if !strings.Contains(stdout, want) {
+			t.Fatalf("expected cloud status output to contain %q, got %q", want, stdout)
+		}
+	}
+}
+
 func TestCmdCloudStatusRejectsInvalidEffectiveRuntimeServerURL(t *testing.T) {
 	stubExitWithPanic(t)
 	stubRuntimeHooks(t)

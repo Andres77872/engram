@@ -79,7 +79,11 @@ func (a *autosyncStatusAdapter) mapPhase(st autosync.Status) server.SyncStatus {
 		} else {
 			base.ReasonCode = "transport_failed"
 		}
-		base.ReasonMessage = st.LastError
+		if st.ReasonMessage != "" {
+			base.ReasonMessage = st.ReasonMessage
+		} else {
+			base.ReasonMessage = st.LastError
+		}
 
 	case autosync.PhaseDisabled:
 		base.Phase = "degraded"
